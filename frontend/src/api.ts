@@ -1,48 +1,61 @@
-export interface IfcElement {
-  ifc_guid: string;
-  express_id: number;
-  ifc_type: string;
-  name: string | null;
-  storey: string | null;
-  psets: Record<string, Record<string, unknown>>;
-}
-
-export interface UploadResult {
-  project_id: string;
-  element_count: number;
-  glb_url: string;
-  elements_url: string;
-}
+import { getToken, clearToken } from "./auth";
 
 const BASE = "/api";
 
-export async function createProject(): Promise<string> {
-  const res = await fetch(`${BASE}/projects`, { method: "POST" });
-  if (!res.ok) throw new Error(`createProject failed: ${res.status}`);
-  const data = await res.json();
-  return data.project_id;
-}
-
-export async function uploadIfc(projectId: string, file: File): Promise<UploadResult> {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch(`${BASE}/projects/${projectId}/ifc`, {
-    method: "POST",
-    body: fd,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`upload failed: ${res.status} ${text}`);
+async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const tok = getToken();
+  const headers = new Headers(init.headers);
+  if (tok) headers.set("authorization", `Bearer ${tok}`);
+  const res = await fetch(BASE + path, { ...init, headers });
+  if (res.status === 401) {
+    clearToken();
+    throw new Error("unauthorized");
   }
-  return res.json();
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json() as Promise<T>;
 }
 
-export async function fetchElements(projectId: string): Promise<IfcElement[]> {
-  const res = await fetch(`${BASE}/projects/${projectId}/elements`);
-  if (!res.ok) throw new Error(`fetchElements failed: ${res.status}`);
-  return res.json();
+export interface Me {
+  id: string;
+  speckle_user_id: string;
+  name: string | null;
+  email: string | null;
+  avatar: string | null;
+  speckle_token: string;
+  speckle_public_url: string;
 }
 
-export function glbUrl(projectId: string): string {
-  return `${BASE}/projects/${projectId}/model.glb`;
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  updatedAt: string;
+  role: string | null;
+}
+
+export interface Model {
+  id: string;
+  name: string;
+  updatedAt: string;
+}
+
+export interface Version {
+  id: string;
+  referencedObject: string;
+  message: string | null;
+  sourceApplication: string | null;
+  createdAt: string;
+}
+
+export const api = {
+  me: () => call<Me>("/me"),
+  projects: () => call<Project[]>("/speckle/projects"),
+  models: (projectId: string) =>
+    call<Model[]>(`/speckle/projects/${projectId}/models`),
+  versions: (projectId: string, modelId: string) =>
+    call<Version[]>(`/speckle/projects/${projectId}/models/${modelId}/versions`),
+};
+
+export function loginUrl(): string {
+  return `${BASE}/auth/speckle/start`;
 }

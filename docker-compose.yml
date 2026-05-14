@@ -1,26 +1,121 @@
+# Local dev stack: our app + a self-hosted Speckle server.
+#
+# Heads-up: Speckle's own deps (postgres / redis / minio) and our app's deps are
+# intentionally separate services so we never cross the data boundary.
+#
+# After `docker compose up`:
+#   - Speckle UI:  http://localhost:3000   (sign up, create project, push a model)
+#   - App UI:      http://localhost:5173
+#   - App API:     http://localhost:8000
+#
+# Before the app will work you must register an OAuth app inside Speckle. See README.
+
 services:
-  backend:
+  # ────────── Speckle stack ──────────
+  speckle-postgres:
+    image: postgres:14-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: speckle
+      POSTGRES_USER: speckle
+      POSTGRES_PASSWORD: speckle
+    volumes:
+      - speckle_postgres:/var/lib/postgresql/data
+
+  speckle-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - speckle_redis:/data
+
+  speckle-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - speckle_minio:/data
+
+  speckle-server:
+    image: speckle/speckle-server:2
+    restart: unless-stopped
+    depends_on:
+      - speckle-postgres
+      - speckle-redis
+      - speckle-minio
+    ports:
+      - "3000:3000"
+    environment:
+      CANONICAL_URL: http://localhost:3000
+      SESSION_SECRET: change-me-speckle-session
+      POSTGRES_URL: speckle-postgres
+      POSTGRES_USER: speckle
+      POSTGRES_PASSWORD: speckle
+      POSTGRES_DB: speckle
+      REDIS_URL: redis://speckle-redis
+      S3_ENDPOINT: http://speckle-minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: speckle-server
+      S3_REGION: us-east-1
+      S3_CREATE_BUCKET: "true"
+      FILE_SIZE_LIMIT_MB: "100"
+      DISABLE_FILE_UPLOADS: "false"
+      ENABLE_MP: "false"
+
+  # ────────── Our app stack ──────────
+  app-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bim
+      POSTGRES_USER: bim
+      POSTGRES_PASSWORD: bim
+    volumes:
+      - app_postgres:/var/lib/postgresql/data
+
+  app-backend:
     build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - app-postgres
+      - speckle-server
     ports:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
-      - bim_data:/data
     environment:
-      BIM_DATA_DIR: /data
+      APP_BASE_URL: http://localhost:5173
+      API_BASE_URL: http://localhost:8000
+      JWT_SECRET: change-me-app-jwt
+      SESSION_SECRET: change-me-app-session
+      DATABASE_URL: postgresql+asyncpg://bim:bim@app-postgres:5432/bim
+      SPECKLE_PUBLIC_URL: http://localhost:3000
+      SPECKLE_INTERNAL_URL: http://speckle-server:3000
+      SPECKLE_APP_ID: ${SPECKLE_APP_ID:-}
+      SPECKLE_APP_SECRET: ${SPECKLE_APP_SECRET:-}
 
-  frontend:
+  app-frontend:
     build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - app-backend
     ports:
       - "5173:5173"
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/index.html:/app/index.html
       - ./frontend/vite.config.ts:/app/vite.config.ts
-    depends_on:
-      - backend
     environment:
-      VITE_API_TARGET: http://backend:8000
+      VITE_API_TARGET: http://app-backend:8000
 
 volumes:
-  bim_data:
+  speckle_postgres:
+  speckle_redis:
+  speckle_minio:
+  app_postgres:

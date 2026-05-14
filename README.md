@@ -1,76 +1,113 @@
 # BIM AI Platform
 
-A web-based BIM platform that ingests IFC and schedule data, uses an LLM to generate 4D construction animations, and plays them back in the browser.
+A web app that adds an AI-driven 4D animation layer on top of [Speckle](https://speckle.systems/). Users connect their existing Speckle projects (Revit / Rhino / ArchiCAD / IFC via Speckle's native connectors), upload a construction schedule, and Claude generates a timeline that drives the Speckle viewer.
 
-## Status: M1 — Static Viewer
+## Status: M1 — Speckle plumbing
 
-This milestone delivers an end-to-end slice of the parsing + rendering pipeline:
+End-to-end slice of the Speckle integration only — no schedule ingest or AI yet:
 
-- Upload an IFC file via the browser
-- Backend parses it with `ifcopenshell` and converts it to glTF via `IfcConvert`
-- The browser loads the glTF in a three.js viewer with orbit controls
-- An element sidebar lets you filter by type / name / storey and inspect property sets
-- Clicking a mesh in the viewer or a row in the sidebar highlights the selected element (matched by IFC GUID)
-
-No queue, no DB, no auth yet — files live on disk under `BIM_DATA_DIR` (default `/tmp/bim_ai_data`).
+- Sign in with a self-hosted Speckle instance via OAuth.
+- List your Speckle projects, models, and versions through the GraphQL API.
+- Embed `@speckle/viewer` and load a chosen version.
 
 ## Architecture
 
 ```
-frontend/   Vite + React + TypeScript + three.js + zustand
-backend/    FastAPI + ifcopenshell + IfcConvert
+frontend/   Vite + React + TS + react-router + @speckle/viewer
+backend/    FastAPI + httpx + SQLAlchemy (asyncpg)
+            └── stores: users (id, speckle_user_id, tokens)
+docker-compose.yml
+            ├── self-hosted Speckle (server + postgres + redis + minio)
+            └── our app (backend + frontend + postgres)
 ```
 
-The frontend proxies `/api/*` to the backend so all browser requests are same-origin.
+Backend boundary discipline: we never copy Speckle model data into our DB. The
+only Speckle-derived data we persist is the per-user OAuth token (encrypted at
+rest is a TODO).
 
-### Key data flow
+## Run
 
-1. `POST /projects` → `{project_id}`
-2. `POST /projects/{id}/ifc` (multipart) — synchronous: parses elements, runs `IfcConvert --use-element-guids` to produce a `.glb`
-3. `GET  /projects/{id}/model.glb` — binary glTF
-4. `GET  /projects/{id}/elements` — JSON catalog of `IfcProduct` instances with property sets
-
-The IFC GlobalId is the join key end-to-end: it survives parsing → glTF node names → three.js mesh names → selection state.
-
-## Run with Docker (recommended)
+### 1. Boot the stack
 
 ```bash
 docker compose up --build
-# frontend: http://localhost:5173
-# backend:  http://localhost:8000/health
 ```
 
-## Run locally without Docker
+Wait for Speckle's first boot — the server image migrates its DB and creates
+the MinIO bucket. Healthy when:
 
-### Backend
+- `http://localhost:3000` shows the Speckle login page
+- `http://localhost:8000/health` returns `{"status":"ok"}`
 
-```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-# IfcConvert is bundled with the ifcopenshell wheel; symlink it onto PATH:
-python -c "import ifcopenshell, glob, os; \
-  print(glob.glob(os.path.dirname(ifcopenshell.__file__)+'/**/IfcConvert*', recursive=True))"
-# put the binary on PATH, e.g.:
-# sudo ln -s /path/to/IfcConvert /usr/local/bin/IfcConvert
+### 2. Register an OAuth app in Speckle
 
-uvicorn app.main:app --reload --port 8000
-```
+This is the one manual step — Speckle requires a logged-in user to create
+OAuth apps:
 
-### Frontend
+1. Open `http://localhost:3000` and sign up (any email; the local server
+   doesn't actually deliver mail unless you wire one up).
+2. Go to **Profile → Developer Settings → Applications → New application**.
+3. Fill in:
+   - **Name**: `BIM AI (dev)`
+   - **Redirect URL**: `http://localhost:8000/auth/speckle/callback`
+   - **Scopes**: at minimum `streams:read`, `users:read`, `profile:read`,
+     `streams:write` (the last only if you later want to write filters back).
+4. Copy the **App ID** and **App Secret** Speckle gives you.
+5. Create `.env` at the repo root from `.env.example` and paste them in:
+   ```
+   SPECKLE_APP_ID=...
+   SPECKLE_APP_SECRET=...
+   ```
+6. Restart the backend: `docker compose restart app-backend`.
 
-```bash
-cd frontend
-npm install
-npm run dev   # http://localhost:5173
-```
+### 3. Push a model into Speckle
 
-## Caveats
+The OAuth flow works on an empty Speckle account, but the viewer needs
+something to render. Quickest paths:
 
-- `IfcConvert` is invoked synchronously, so large IFC files will tie up the request. M2 moves this onto a Celery worker.
-- The backend serves files with permissive CORS — intended for local dev only.
-- Property sets with non-JSON-serialisable values are silently coerced to strings.
+- Use a Speckle **connector** (Revit, Rhino, etc.) from a desktop app pointing
+  at `http://localhost:3000`, or
+- Drag an `.ifc` file onto a Speckle project — the bundled
+  `speckle-fileimport-service` is **not** included in this minimal compose;
+  enable it by adding `speckle/speckle-fileimport-service` if you want
+  drag-and-drop IFC uploads, or
+- Use the public sample data: clone an existing public project from
+  speckle.xyz with the Speckle CLI.
+
+### 4. Use the app
+
+Open `http://localhost:5173` and **Sign in with Speckle**. You should land on
+your project list, drill into a model and version, and see the viewer load it.
+
+## Endpoints
+
+| Path | Notes |
+|---|---|
+| `GET  /auth/speckle/start` | Begin OAuth (redirects to Speckle) |
+| `GET  /auth/speckle/callback` | OAuth return, mints app JWT, redirects to SPA |
+| `GET  /me` | Current user, including their Speckle token for the viewer |
+| `GET  /speckle/projects` | GraphQL passthrough — `activeUser.projects` |
+| `GET  /speckle/projects/{id}/models` | `project.models` |
+| `GET  /speckle/projects/{id}/models/{mid}/versions` | `model.versions` |
+
+## Known M1 compromises
+
+- The Speckle access token is handed to the SPA via `/me`. M2 should mint
+  short-lived, narrowly-scoped tokens or proxy viewer requests through the
+  backend.
+- Speckle tokens are stored unencrypted in Postgres. Wrap with `cryptography`
+  Fernet before this leaves dev.
+- The Dockerfiles run the dev servers (`uvicorn --reload`, `vite dev`). Build
+  production images separately when deploying.
+- The compose file ships the minimum Speckle services. Preview thumbnails,
+  webhooks, and the dedicated file-import service are omitted; add the
+  corresponding `speckle/*` images if you want them.
+- If Speckle's image fails to start, check `docker compose logs speckle-server`
+  — its env-var contract evolves between versions. The canonical reference is
+  https://github.com/specklesystems/speckle-server/blob/main/docker-compose.yml.
 
 ## What's next (M2)
 
-Async processing with Celery + Redis, progress events over SSE, Postgres persistence of element catalogs.
+Schedule upload (Excel/CSV → pandas → canonical schema), Claude column-mapping
+with the `submit_mapping` tool, mapping confirmation UI. Stays well clear of
+the viewer until M3.
