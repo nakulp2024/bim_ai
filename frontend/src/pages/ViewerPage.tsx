@@ -86,9 +86,13 @@ export function ViewerPage() {
         <span style={{ color: "#888", fontSize: 12 }}>
           {projectId} / {modelId} @ {versionId}
         </span>
-        <span style={{ color: "#888", fontSize: 12, marginLeft: "auto" }}>
-          {status}
-        </span>
+        <Link
+          to={`/projects/${projectId}/models/${modelId}/versions/${versionId}/schedule`}
+          style={{ color: "#9cf", marginLeft: "auto" }}
+        >
+          Schedule →
+        </Link>
+        <span style={{ color: "#888", fontSize: 12 }}>{status}</span>
       </div>
       <div ref={containerRef} style={{ position: "relative", overflow: "hidden" }} />
     </div>

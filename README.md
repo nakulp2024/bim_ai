@@ -2,28 +2,33 @@
 
 A web app that adds an AI-driven 4D animation layer on top of [Speckle](https://speckle.systems/). Users connect their existing Speckle projects (Revit / Rhino / ArchiCAD / IFC via Speckle's native connectors), upload a construction schedule, and Claude generates a timeline that drives the Speckle viewer.
 
-## Status: M1 — Speckle plumbing
+## Status: M2 — Schedule upload + AI column mapping
 
-End-to-end slice of the Speckle integration only — no schedule ingest or AI yet:
+Adds the first AI layer on top of M1:
 
-- Sign in with a self-hosted Speckle instance via OAuth.
-- List your Speckle projects, models, and versions through the GraphQL API.
-- Embed `@speckle/viewer` and load a chosen version.
+- **Schedule upload** (CSV / Excel) bound to a Speckle version, parsed with pandas.
+- **Speckle catalog summary** built server-side via `specklepy` (counts per category and storey, sample elements with `applicationId` / `family` / `type`).
+- **Claude column mapping**: a Celery worker calls `claude-sonnet-4-6` with `messages.parse()` and a Pydantic schema to propose how columns map to canonical roles + a join strategy.
+- **Mapping confirmation UI**: editable role table with confidence badge; saves a confirmed mapping back to Postgres.
+
+M1 features still work: Speckle OAuth, project / model / version browsing, embedded `@speckle/viewer`.
 
 ## Architecture
 
 ```
 frontend/   Vite + React + TS + react-router + @speckle/viewer
 backend/    FastAPI + httpx + SQLAlchemy (asyncpg)
-            └── stores: users (id, speckle_user_id, tokens)
+            ├── Celery worker (sync SQLAlchemy + psycopg2 + specklepy + anthropic)
+            └── stores: users, schedule_uploads, mapping_proposals, jobs
 docker-compose.yml
             ├── self-hosted Speckle (server + postgres + redis + minio)
-            └── our app (backend + frontend + postgres)
+            └── our app (api + worker + postgres + redis + frontend)
 ```
 
 Backend boundary discipline: we never copy Speckle model data into our DB. The
-only Speckle-derived data we persist is the per-user OAuth token (encrypted at
-rest is a TODO).
+only Speckle-derived data we persist is the per-user OAuth token, the Speckle
+catalog *summary* used for one mapping pass (counts and a few sample elements),
+and pointers back to Speckle by project / model / version / applicationId.
 
 ## Run
 
@@ -89,25 +94,57 @@ your project list, drill into a model and version, and see the viewer load it.
 | `GET  /speckle/projects` | GraphQL passthrough — `activeUser.projects` |
 | `GET  /speckle/projects/{id}/models` | `project.models` |
 | `GET  /speckle/projects/{id}/models/{mid}/versions` | `model.versions` |
+| `POST /schedules` (multipart) | Upload schedule, queue mapping job |
+| `GET  /schedules` | List the user's uploaded schedules (optionally filter by `speckle_version_id`) |
+| `GET  /schedules/{id}/mapping` | Latest mapping proposal + catalog summary |
+| `POST /schedules/{id}/mapping/confirm` | Persist the (possibly edited) confirmed mapping |
+| `GET  /jobs/{id}` | Job status for client polling |
 
-## Known M1 compromises
+## M2 setup
 
-- The Speckle access token is handed to the SPA via `/me`. M2 should mint
-  short-lived, narrowly-scoped tokens or proxy viewer requests through the
-  backend.
-- Speckle tokens are stored unencrypted in Postgres. Wrap with `cryptography`
-  Fernet before this leaves dev.
-- The Dockerfiles run the dev servers (`uvicorn --reload`, `vite dev`). Build
-  production images separately when deploying.
+In addition to the Speckle OAuth app from M1, M2 needs an Anthropic API key.
+Add it to `.env`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# CLAUDE_MODEL=claude-sonnet-4-6   # optional override
+```
+
+Restart the stack so the worker picks up the new key:
+
+```bash
+docker compose up -d --build app-backend app-worker
+```
+
+## Using the schedule flow
+
+1. Sign in, drill into a project → model → version, click **Schedule →** in the
+   viewer top bar.
+2. Upload an Excel or CSV schedule.
+3. The page polls the job until it's ready (typically 5–20s once Claude
+   responds). You'll see a proposed mapping with a confidence badge.
+4. Edit roles / join strategy / Speckle property as needed, then **Save mapping**.
+
+The mapping is persisted against the (user, speckle_version_id) tuple. M3 will
+consume it to resolve schedule rows to Speckle object IDs.
+
+## Known M2 compromises
+
+- The Speckle access token is handed to the SPA via `/me`. A future milestone
+  should mint short-lived, narrowly-scoped tokens.
+- Speckle tokens and uploaded schedules are stored unencrypted. Wrap with
+  `cryptography` Fernet before this leaves dev.
+- Catalog traversal materialises the whole referenced object in worker memory.
+  For models above ~50k elements, switch to a streamed traversal or pre-cache.
+- No row-to-element resolution yet — that's M3.
+- The Dockerfiles run dev servers (`uvicorn --reload` not enabled, but `vite
+  dev`). Build production images separately when deploying.
 - The compose file ships the minimum Speckle services. Preview thumbnails,
   webhooks, and the dedicated file-import service are omitted; add the
   corresponding `speckle/*` images if you want them.
-- If Speckle's image fails to start, check `docker compose logs speckle-server`
-  — its env-var contract evolves between versions. The canonical reference is
-  https://github.com/specklesystems/speckle-server/blob/main/docker-compose.yml.
 
-## What's next (M2)
+## What's next (M3)
 
-Schedule upload (Excel/CSV → pandas → canonical schema), Claude column-mapping
-with the `submit_mapping` tool, mapping confirmation UI. Stays well clear of
-the viewer until M3.
+Deterministic row-to-element resolution by the chosen join strategy, surfaced
+as a "X / Y rows matched" report with samples of unmatched rows. Then M4 starts
+the animation generation pass.

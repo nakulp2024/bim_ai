@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .auth.speckle_oauth import router as speckle_oauth_router
 from .config import settings
 from .db import init_db
+from .routes.jobs import router as jobs_router
 from .routes.me import router as me_router
+from .routes.schedules import router as schedules_router
 from .routes.speckle import router as speckle_router
 
 
@@ -35,3 +37,5 @@ def health() -> dict:
 app.include_router(speckle_oauth_router)
 app.include_router(me_router)
 app.include_router(speckle_router)
+app.include_router(schedules_router)
+app.include_router(jobs_router)

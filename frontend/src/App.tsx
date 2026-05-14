@@ -7,6 +7,7 @@ import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { SchedulePage } from "./pages/SchedulePage";
 import { ViewerPage } from "./pages/ViewerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -112,6 +113,17 @@ export function App() {
         element={
           <RequireAuth>
             <ViewerPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/projects/:projectId/models/:modelId/versions/:versionId/schedule"
+        element={
+          <RequireAuth>
+            <div>
+              <Topbar />
+              <SchedulePage />
+            </div>
           </RequireAuth>
         }
       />

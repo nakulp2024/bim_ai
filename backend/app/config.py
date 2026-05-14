@@ -14,15 +14,24 @@ class Settings(BaseSettings):
 
     # --- Database (our app DB, NOT Speckle's) ---
     database_url: str = "postgresql+asyncpg://bim:bim@app-postgres:5432/bim"
+    # Sync URL used by Celery workers (no asyncpg).
+    database_url_sync: str = "postgresql+psycopg2://bim:bim@app-postgres:5432/bim"
+
+    # --- Redis / Celery (our app, separate from Speckle's Redis) ---
+    redis_url: str = "redis://app-redis:6379/0"
+
+    # --- Object storage / blob layout ---
+    data_dir: str = "/data"
 
     # --- Speckle ---
-    # The URL the BROWSER uses to reach Speckle (for OAuth redirects + viewer).
     speckle_public_url: str = "http://localhost:3000"
-    # The URL the BACKEND uses to reach Speckle (server-to-server).
     speckle_internal_url: str = "http://speckle-server:3000"
-    # Registered OAuth app credentials (created in Speckle UI; see README).
     speckle_app_id: str = ""
     speckle_app_secret: str = ""
+
+    # --- Anthropic ---
+    anthropic_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-6"
 
 
 settings = Settings()

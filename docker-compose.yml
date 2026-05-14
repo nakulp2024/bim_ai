@@ -79,26 +79,52 @@ services:
     volumes:
       - app_postgres:/var/lib/postgresql/data
 
+  app-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - app_redis:/data
+
   app-backend:
     build: ./backend
     restart: unless-stopped
     depends_on:
       - app-postgres
+      - app-redis
       - speckle-server
     ports:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
-    environment:
+      - app_data:/data
+    environment: &app-env
       APP_BASE_URL: http://localhost:5173
       API_BASE_URL: http://localhost:8000
       JWT_SECRET: change-me-app-jwt
       SESSION_SECRET: change-me-app-session
       DATABASE_URL: postgresql+asyncpg://bim:bim@app-postgres:5432/bim
+      DATABASE_URL_SYNC: postgresql+psycopg2://bim:bim@app-postgres:5432/bim
+      REDIS_URL: redis://app-redis:6379/0
+      DATA_DIR: /data
       SPECKLE_PUBLIC_URL: http://localhost:3000
       SPECKLE_INTERNAL_URL: http://speckle-server:3000
       SPECKLE_APP_ID: ${SPECKLE_APP_ID:-}
       SPECKLE_APP_SECRET: ${SPECKLE_APP_SECRET:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+
+  app-worker:
+    build: ./backend
+    restart: unless-stopped
+    command: celery -A app.celery_app.celery worker --loglevel=info --concurrency=2
+    depends_on:
+      - app-postgres
+      - app-redis
+      - speckle-server
+    volumes:
+      - ./backend/app:/app/app
+      - app_data:/data
+    environment: *app-env
 
   app-frontend:
     build: ./frontend
@@ -119,3 +145,5 @@ volumes:
   speckle_redis:
   speckle_minio:
   app_postgres:
+  app_redis:
+  app_data:
