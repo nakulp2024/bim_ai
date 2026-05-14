@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+node_modules/
+dist/
+.vite/
+
+# Local data
+/tmp/
+/data/
+*.ifc
+*.glb
+
+.DS_Store
