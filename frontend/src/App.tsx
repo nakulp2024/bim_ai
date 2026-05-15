@@ -6,6 +6,7 @@ import { useStore } from "./store";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProjectPage } from "./pages/ProjectPage";
+import { AnimationPage } from "./pages/AnimationPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { SchedulePage } from "./pages/SchedulePage";
 import { ViewerPage } from "./pages/ViewerPage";
@@ -124,6 +125,14 @@ export function App() {
               <Topbar />
               <SchedulePage />
             </div>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/projects/:projectId/models/:modelId/versions/:versionId/schedule/:scheduleId/animation"
+        element={
+          <RequireAuth>
+            <AnimationPage />
           </RequireAuth>
         }
       />
