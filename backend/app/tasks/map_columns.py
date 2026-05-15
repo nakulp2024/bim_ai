@@ -5,14 +5,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ..ai.mapping import propose_mapping
 from ..celery_app import celery
 from ..db_sync import SyncSessionLocal
-from ..db import Job, MappingProposal, ScheduleUpload, User
+from ..db import ElementIndex, Job, MappingProposal, ScheduleUpload, User
 from ..schedules.ingest import read_schedule, summarise
-from ..speckle.catalog import build_catalog_summary
+from ..speckle.catalog import element_rows, summarise_elements, walk_elements
 
 
 def _update_job(session, job: Job, **fields) -> None:
@@ -20,6 +20,30 @@ def _update_job(session, job: Job, **fields) -> None:
         setattr(job, k, v)
     job.updated_at = datetime.now(timezone.utc)
     session.add(job)
+    session.commit()
+
+
+def _reindex_elements(session, schedule: ScheduleUpload, rows: list[dict]) -> None:
+    """Replace this version's element_index entries with the freshly-walked set."""
+    session.execute(
+        delete(ElementIndex).where(
+            ElementIndex.user_id == schedule.user_id,
+            ElementIndex.speckle_project_id == schedule.speckle_project_id,
+            ElementIndex.speckle_version_id == schedule.speckle_version_id,
+        )
+    )
+    for r in rows:
+        if not r.get("speckle_object_id"):
+            continue
+        session.add(
+            ElementIndex(
+                user_id=schedule.user_id,
+                speckle_project_id=schedule.speckle_project_id,
+                speckle_model_id=schedule.speckle_model_id,
+                speckle_version_id=schedule.speckle_version_id,
+                **r,
+            )
+        )
     session.commit()
 
 
@@ -40,12 +64,15 @@ def run(self, job_id: str, schedule_id: str) -> dict:
             df = read_schedule(Path(schedule.storage_path))
             summary = summarise(df, sample_n=5)
 
-            _update_job(session, job, progress=0.25, message="Fetching Speckle catalog…")
-            catalog = build_catalog_summary(
+            _update_job(session, job, progress=0.25, message="Walking Speckle catalog…")
+            elements = walk_elements(
                 token=user.speckle_access_token,
                 speckle_project_id=schedule.speckle_project_id,
                 referenced_object=schedule.speckle_referenced_object or schedule.speckle_version_id,
             )
+            rows = element_rows(elements)
+            _reindex_elements(session, schedule, rows)
+            catalog = summarise_elements(elements)
 
             _update_job(session, job, progress=0.6, message="Asking Claude for column mapping…")
             proposal = propose_mapping(
@@ -77,6 +104,7 @@ def run(self, job_id: str, schedule_id: str) -> dict:
                     "mapping_proposal_id": mp.id,
                     "confidence": proposal.confidence,
                     "join_strategy": proposal.join_strategy,
+                    "indexed_elements": len(rows),
                 },
             )
             return job.result or {}

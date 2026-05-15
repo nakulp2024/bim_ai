@@ -8,13 +8,21 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.jwt_tokens import current_user
 from ..celery_app import celery
 from ..config import settings
-from ..db import Job, MappingProposal, ScheduleUpload, User, get_session
+from ..db import (
+    Animation,
+    Job,
+    MappingProposal,
+    ScheduleElementLink,
+    ScheduleUpload,
+    User,
+    get_session,
+)
 from ..schedules.ingest import read_schedule, summarise
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -227,5 +235,147 @@ async def confirm_mapping(
 
     proposal.confirmed = payload
     proposal.confirmed_at = datetime.now(timezone.utc)
+
+    job = Job(
+        id=uuid.uuid4().hex,
+        user_id=user.id,
+        kind="resolve_rows",
+        state="queued",
+        progress=0.0,
+        message="Queued.",
+        payload={"schedule_id": schedule_id},
+    )
+    session.add(job)
     await session.commit()
-    return {"ok": True, "proposal_id": proposal.id}
+    celery.send_task("app.tasks.resolve_rows.run", args=[job.id, schedule_id])
+    return {"ok": True, "proposal_id": proposal.id, "job_id": job.id}
+
+
+@router.get("/{schedule_id}/resolution")
+async def get_resolution(
+    schedule_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    sched = (
+        await session.execute(
+            select(ScheduleUpload).where(
+                ScheduleUpload.id == schedule_id, ScheduleUpload.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if not sched:
+        raise HTTPException(404, detail="schedule not found")
+    total_links = (
+        await session.execute(
+            select(func.count(ScheduleElementLink.id)).where(
+                ScheduleElementLink.schedule_id == schedule_id
+            )
+        )
+    ).scalar_one()
+    matched_tasks = (
+        await session.execute(
+            select(func.count(func.distinct(ScheduleElementLink.task_id))).where(
+                ScheduleElementLink.schedule_id == schedule_id
+            )
+        )
+    ).scalar_one()
+    return {
+        "schedule_id": schedule_id,
+        "total_links": int(total_links),
+        "matched_tasks": int(matched_tasks),
+    }
+
+
+@router.post("/{schedule_id}/animation")
+async def trigger_animation(
+    schedule_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    sched = (
+        await session.execute(
+            select(ScheduleUpload).where(
+                ScheduleUpload.id == schedule_id, ScheduleUpload.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if not sched:
+        raise HTTPException(404, detail="schedule not found")
+
+    link_count = (
+        await session.execute(
+            select(func.count(ScheduleElementLink.id)).where(
+                ScheduleElementLink.schedule_id == schedule_id
+            )
+        )
+    ).scalar_one()
+    if int(link_count) == 0:
+        raise HTTPException(409, detail="no resolved element links; confirm the mapping first")
+
+    job = Job(
+        id=uuid.uuid4().hex,
+        user_id=user.id,
+        kind="generate_animation",
+        state="queued",
+        progress=0.0,
+        message="Queued.",
+        payload={"schedule_id": schedule_id},
+    )
+    session.add(job)
+    await session.commit()
+    celery.send_task("app.tasks.generate_animation.run", args=[job.id, schedule_id])
+    return {"job_id": job.id}
+
+
+@router.get("/{schedule_id}/animation")
+async def get_animation(
+    schedule_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    sched = (
+        await session.execute(
+            select(ScheduleUpload).where(
+                ScheduleUpload.id == schedule_id, ScheduleUpload.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if not sched:
+        raise HTTPException(404, detail="schedule not found")
+    anim = (
+        await session.execute(
+            select(Animation)
+            .where(Animation.schedule_id == schedule_id)
+            .order_by(desc(Animation.created_at))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not anim:
+        return {"schedule_id": schedule_id, "animation": None}
+
+    # Hydrate links so the frontend can expand task → elements.
+    rows = (
+        (
+            await session.execute(
+                select(
+                    ScheduleElementLink.task_id, ScheduleElementLink.speckle_object_id
+                ).where(ScheduleElementLink.schedule_id == schedule_id)
+            )
+        )
+        .all()
+    )
+    task_to_speckle: dict[str, list[str]] = {}
+    for tid, sid in rows:
+        task_to_speckle.setdefault(tid, []).append(sid)
+
+    return {
+        "animation_id": anim.id,
+        "schedule_id": schedule_id,
+        "script": anim.script,
+        "task_to_speckle": task_to_speckle,
+        "speckle_project_id": sched.speckle_project_id,
+        "speckle_model_id": sched.speckle_model_id,
+        "speckle_version_id": sched.speckle_version_id,
+        "created_at": anim.created_at.isoformat(),
+    }

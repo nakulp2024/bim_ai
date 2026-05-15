@@ -152,7 +152,7 @@ export const api = {
   mapping: (scheduleId: string) =>
     call<MappingView>(`/schedules/${scheduleId}/mapping`),
   confirmMapping: (scheduleId: string, payload: MappingProposalBody) =>
-    call<{ ok: boolean; proposal_id: string }>(
+    call<{ ok: boolean; proposal_id: string; job_id: string }>(
       `/schedules/${scheduleId}/mapping/confirm`,
       {
         method: "POST",
@@ -160,7 +160,44 @@ export const api = {
         body: JSON.stringify(payload),
       },
     ),
+  resolution: (scheduleId: string) =>
+    call<{ schedule_id: string; total_links: number; matched_tasks: number }>(
+      `/schedules/${scheduleId}/resolution`,
+    ),
+  triggerAnimation: (scheduleId: string) =>
+    call<{ job_id: string }>(`/schedules/${scheduleId}/animation`, {
+      method: "POST",
+    }),
+  animation: (scheduleId: string) =>
+    call<AnimationView>(`/schedules/${scheduleId}/animation`),
 };
+
+export interface AnimationScript {
+  version: string;
+  start_date: string; // YYYY-MM-DD
+  duration_days: number;
+  tasks: {
+    task_id: string;
+    name: string | null;
+    start_day: number;
+    end_day: number;
+    activity: string;
+    phase: string | null;
+  }[];
+  phases: { name: string; color_hex: string; task_ids: string[] }[];
+}
+
+export interface AnimationView {
+  animation_id?: string;
+  schedule_id: string;
+  script: AnimationScript | null;
+  task_to_speckle?: Record<string, string[]>;
+  speckle_project_id?: string;
+  speckle_model_id?: string;
+  speckle_version_id?: string;
+  created_at?: string;
+  animation?: null;
+}
 
 export function loginUrl(): string {
   return `${BASE}/auth/speckle/start`;

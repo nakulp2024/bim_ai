@@ -77,6 +77,35 @@ def _category(el: Any) -> str | None:
     return None
 
 
+def walk_elements(token: str, speckle_project_id: str, referenced_object: str) -> list[Any]:
+    """Receive the referenced object tree and return all renderable products."""
+    client = _make_client(token)
+    transport = ServerTransport(client=client, stream_id=speckle_project_id)
+    root = operations.receive(obj_id=referenced_object, remote_transport=transport)
+    elements: list[Any] = []
+    _walk(root, elements, set())
+    return elements
+
+
+def element_rows(elements: list[Any]) -> list[dict[str, Any]]:
+    """Project the raw Speckle objects to the plain dicts we persist."""
+    rows: list[dict[str, Any]] = []
+    for el in elements:
+        rows.append(
+            {
+                "speckle_object_id": getattr(el, "id", None),
+                "application_id": getattr(el, "applicationId", None),
+                "category": _category(el),
+                "level_name": _level_name(el),
+                "family": getattr(el, "family", None),
+                "type_name": getattr(el, "type", None),
+                "speckle_type": getattr(el, "speckle_type", None),
+                "name": getattr(el, "name", None),
+            }
+        )
+    return rows
+
+
 def build_catalog_summary(
     token: str,
     speckle_project_id: str,
@@ -84,12 +113,11 @@ def build_catalog_summary(
     sample_n: int = 20,
 ) -> dict[str, Any]:
     """Receive the referenced object tree and return a compact summary for Claude."""
-    client = _make_client(token)
-    transport = ServerTransport(client=client, stream_id=speckle_project_id)
-    root = operations.receive(obj_id=referenced_object, remote_transport=transport)
+    elements = walk_elements(token, speckle_project_id, referenced_object)
+    return summarise_elements(elements, sample_n=sample_n)
 
-    elements: list[Any] = []
-    _walk(root, elements, set())
+
+def summarise_elements(elements: list[Any], sample_n: int = 20) -> dict[str, Any]:
 
     by_category: Counter[str] = Counter()
     by_level: Counter[str] = Counter()

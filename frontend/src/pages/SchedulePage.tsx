@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   api,
   type ColumnMapping,
@@ -9,6 +9,11 @@ import {
   type MappingView,
   type Role,
 } from "../api";
+
+interface ResolutionStats {
+  total_links: number;
+  matched_tasks: number;
+}
 
 const ROLES: Role[] = [
   "task_id",
@@ -44,7 +49,12 @@ export function SchedulePage() {
   const [status, setStatus] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [confirmedAt, setConfirmedAt] = useState<string | null>(null);
+  const [resolveJob, setResolveJob] = useState<JobStatus | null>(null);
+  const [resolution, setResolution] = useState<ResolutionStats | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [genJob, setGenJob] = useState<JobStatus | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const nav = useNavigate();
 
   // Poll the job until ready/failed.
   useEffect(() => {
@@ -113,14 +123,80 @@ export function SchedulePage() {
   const onConfirm = async () => {
     if (!scheduleId || !edited) return;
     setConfirming(true);
+    setResolution(null);
+    setResolveJob(null);
     try {
-      await api.confirmMapping(scheduleId, edited);
+      const r = await api.confirmMapping(scheduleId, edited);
       setConfirmedAt(new Date().toISOString());
-      setStatus("Mapping saved.");
+      setStatus("Mapping saved. Resolving rows…");
+      void pollResolveJob(r.job_id);
     } catch (e) {
       setStatus(`Save failed: ${(e as Error).message}`);
     } finally {
       setConfirming(false);
+    }
+  };
+
+  const pollResolveJob = async (jId: string) => {
+    while (true) {
+      try {
+        const j = await api.job(jId);
+        setResolveJob(j);
+        if (j.state === "ready") {
+          if (scheduleId) setResolution(await api.resolution(scheduleId));
+          setStatus("Resolution complete.");
+          return;
+        }
+        if (j.state === "failed") {
+          setStatus(`Resolution failed: ${j.error ?? "unknown"}`);
+          return;
+        }
+      } catch (e) {
+        setStatus(`Polling error: ${(e as Error).message}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  };
+
+  const onGenerateAnimation = async () => {
+    if (!scheduleId) return;
+    setGenerating(true);
+    setGenJob(null);
+    try {
+      const r = await api.triggerAnimation(scheduleId);
+      setStatus("Generating animation…");
+      void pollAnimationJob(r.job_id);
+    } catch (e) {
+      setStatus(`Animation kick-off failed: ${(e as Error).message}`);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const pollAnimationJob = async (jId: string) => {
+    while (true) {
+      try {
+        const j = await api.job(jId);
+        setGenJob(j);
+        if (j.state === "ready") {
+          setStatus("Animation ready.");
+          if (projectId && modelId && versionId && scheduleId) {
+            nav(
+              `/projects/${projectId}/models/${modelId}/versions/${versionId}/schedule/${scheduleId}/animation`,
+            );
+          }
+          return;
+        }
+        if (j.state === "failed") {
+          setStatus(`Animation failed: ${j.error ?? "unknown"}`);
+          return;
+        }
+      } catch (e) {
+        setStatus(`Polling error: ${(e as Error).message}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
     }
   };
 
@@ -328,6 +404,53 @@ export function SchedulePage() {
               </span>
             )}
           </div>
+
+          {resolveJob && resolveJob.state !== "ready" && (
+            <div style={{ marginTop: 16, padding: 10, background: "#181d22", borderRadius: 4 }}>
+              <div style={{ color: "#888", fontSize: 12 }}>
+                Resolving rows · {resolveJob.state}
+              </div>
+              <div style={{ fontSize: 13 }}>{resolveJob.message}</div>
+            </div>
+          )}
+
+          {resolution && (
+            <div
+              style={{
+                marginTop: 16,
+                padding: 12,
+                background: "#15201a",
+                border: "1px solid #1d6f3c",
+                borderRadius: 4,
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                Matched {resolution.matched_tasks} task(s) to{" "}
+                {resolution.total_links} Speckle element(s).
+              </div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <button
+                  onClick={onGenerateAnimation}
+                  disabled={generating || resolution.total_links === 0}
+                  style={{
+                    background: "#3a7",
+                    color: "#fff",
+                    border: "none",
+                    padding: "8px 14px",
+                    borderRadius: 4,
+                    cursor: generating ? "wait" : "pointer",
+                  }}
+                >
+                  {generating ? "Starting…" : "Generate animation →"}
+                </button>
+                {genJob && (
+                  <span style={{ color: "#888", fontSize: 12 }}>
+                    {genJob.state}: {genJob.message}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {mapping.catalog_summary && (
             <details style={{ marginTop: 24 }}>

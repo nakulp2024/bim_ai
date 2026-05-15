@@ -90,6 +90,57 @@ class Job(Base):
     )
 
 
+class ElementIndex(Base):
+    """One row per IfcProduct/IfcProduct-equivalent in a Speckle version.
+
+    Built from the catalog walk; powers row-to-element resolution.
+    Keyed by (user_id, project_id, version_id) — different versions of the
+    same model get distinct entries so we can re-stitch animations.
+    """
+
+    __tablename__ = "element_index"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    speckle_project_id: Mapped[str] = mapped_column(String, index=True)
+    speckle_model_id: Mapped[str] = mapped_column(String, index=True)
+    speckle_version_id: Mapped[str] = mapped_column(String, index=True)
+    speckle_object_id: Mapped[str] = mapped_column(String, index=True)
+    application_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    category: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    level_name: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    family: Mapped[str | None] = mapped_column(String, nullable=True)
+    type_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    speckle_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ScheduleElementLink(Base):
+    """Resolved (schedule row → speckle element) pairs."""
+
+    __tablename__ = "schedule_element_links"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    schedule_id: Mapped[str] = mapped_column(
+        String, ForeignKey("schedule_uploads.id"), index=True
+    )
+    task_id: Mapped[str] = mapped_column(String, index=True)
+    speckle_object_id: Mapped[str] = mapped_column(String, index=True)
+    application_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str] = mapped_column(String)  # 'deterministic' | 'ai'
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class Animation(Base):
+    __tablename__ = "animations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    schedule_id: Mapped[str] = mapped_column(
+        String, ForeignKey("schedule_uploads.id"), index=True
+    )
+    script: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 engine = create_async_engine(settings.database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

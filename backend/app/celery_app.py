@@ -6,7 +6,11 @@ celery = Celery(
     "bim_ai",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.map_columns"],
+    include=[
+        "app.tasks.map_columns",
+        "app.tasks.resolve_rows",
+        "app.tasks.generate_animation",
+    ],
 )
 
 celery.conf.update(
