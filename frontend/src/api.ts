@@ -202,3 +202,9 @@ export interface AnimationView {
 export function loginUrl(): string {
   return `${BASE}/auth/speckle/start`;
 }
+
+export function jobEventsUrl(jobId: string): string {
+  const tok = getToken();
+  const qp = tok ? `?token=${encodeURIComponent(tok)}` : "";
+  return `${BASE}/jobs/${jobId}/events${qp}`;
+}

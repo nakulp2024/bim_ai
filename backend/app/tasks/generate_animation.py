@@ -21,6 +21,7 @@ from ..db import (
     ScheduleUpload,
 )
 from ..db_sync import SyncSessionLocal
+from ..events import publish_job
 from ..schedules.ingest import read_schedule
 
 
@@ -30,6 +31,17 @@ def _update_job(session, job: Job, **fields) -> None:
     job.updated_at = datetime.now(timezone.utc)
     session.add(job)
     session.commit()
+    publish_job(
+        job.id,
+        {
+            "id": job.id,
+            "state": job.state,
+            "progress": job.progress,
+            "message": job.message,
+            "result": job.result,
+            "error": job.error,
+        },
+    )
 
 
 def _role_to_column(mapping: list[dict[str, Any]]) -> dict[str, str]:

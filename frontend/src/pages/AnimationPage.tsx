@@ -32,6 +32,20 @@ export function AnimationPage() {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [status, setStatus] = useState("Loading animation…");
+  const [copied, setCopied] = useState(false);
+
+  const onShare = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard may be blocked in iframe / non-https; fall back to prompt
+      window.prompt("Copy this link", window.location.href);
+    }
+  };
+
+  const isError = status.toLowerCase().startsWith("error");
 
   // Fetch animation script.
   useEffect(() => {
@@ -171,7 +185,31 @@ export function AnimationPage() {
         <span style={{ color: "#888", fontSize: 12 }}>
           schedule {scheduleId} · {script?.tasks.length ?? 0} tasks
         </span>
-        <span style={{ color: "#888", fontSize: 12, marginLeft: "auto" }}>
+        <button
+          onClick={onShare}
+          style={{
+            marginLeft: "auto",
+            background: copied ? "#1d6f3c" : "transparent",
+            color: "#ccc",
+            border: "1px solid #333",
+            padding: "4px 10px",
+            borderRadius: 3,
+            cursor: "pointer",
+            fontSize: 12,
+          }}
+        >
+          {copied ? "Link copied" : "Share link"}
+        </button>
+        <span
+          style={{
+            color: isError ? "#f88" : "#888",
+            fontSize: 12,
+            maxWidth: 360,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
           {status}
         </span>
       </div>

@@ -11,6 +11,7 @@ from ..ai.mapping import propose_mapping
 from ..celery_app import celery
 from ..db_sync import SyncSessionLocal
 from ..db import ElementIndex, Job, MappingProposal, ScheduleUpload, User
+from ..events import publish_job
 from ..schedules.ingest import read_schedule, summarise
 from ..speckle.catalog import element_rows, summarise_elements, walk_elements
 
@@ -21,6 +22,17 @@ def _update_job(session, job: Job, **fields) -> None:
     job.updated_at = datetime.now(timezone.utc)
     session.add(job)
     session.commit()
+    publish_job(
+        job.id,
+        {
+            "id": job.id,
+            "state": job.state,
+            "progress": job.progress,
+            "message": job.message,
+            "result": job.result,
+            "error": job.error,
+        },
+    )
 
 
 def _reindex_elements(session, schedule: ScheduleUpload, rows: list[dict]) -> None:

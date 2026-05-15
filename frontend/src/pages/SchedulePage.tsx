@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   api,
+  jobEventsUrl,
   type ColumnMapping,
   type JobStatus,
   type JoinStrategy,
@@ -9,6 +10,25 @@ import {
   type MappingView,
   type Role,
 } from "../api";
+
+function subscribeJob(jobId: string, onUpdate: (j: JobStatus) => void): () => void {
+  const es = new EventSource(jobEventsUrl(jobId));
+  es.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      onUpdate(data as JobStatus);
+      if (data.state === "ready" || data.state === "failed") {
+        es.close();
+      }
+    } catch {
+      // ignore non-json keepalive frames
+    }
+  };
+  es.onerror = () => {
+    // EventSource auto-reconnects; nothing to do.
+  };
+  return () => es.close();
+}
 
 interface ResolutionStats {
   total_links: number;
@@ -56,36 +76,31 @@ export function SchedulePage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const nav = useNavigate();
 
-  // Poll the job until ready/failed.
+  // Live job updates via SSE.
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
-    const tick = async () => {
-      try {
-        const j = await api.job(jobId);
-        if (cancelled) return;
-        setJob(j);
-        if (j.state === "ready") {
-          const m = await api.mapping(scheduleId!);
+    const stop = subscribeJob(jobId, async (j) => {
+      if (cancelled) return;
+      setJob(j);
+      if (j.state === "ready" && scheduleId) {
+        try {
+          const m = await api.mapping(scheduleId);
           if (cancelled) return;
           setMapping(m);
           setEdited(m.proposed);
           setConfirmedAt(m.confirmed_at ?? null);
           setStatus("");
-          return;
+        } catch (e) {
+          setStatus(`Failed to load mapping: ${(e as Error).message}`);
         }
-        if (j.state === "failed") {
-          setStatus(`Job failed: ${j.error ?? "unknown error"}`);
-          return;
-        }
-        setTimeout(tick, 1500);
-      } catch (e) {
-        setStatus(`Polling error: ${(e as Error).message}`);
+      } else if (j.state === "failed") {
+        setStatus(`Job failed: ${j.error ?? "unknown error"}`);
       }
-    };
-    void tick();
+    });
     return () => {
       cancelled = true;
+      stop();
     };
   }, [jobId, scheduleId]);
 
@@ -137,26 +152,20 @@ export function SchedulePage() {
     }
   };
 
-  const pollResolveJob = async (jId: string) => {
-    while (true) {
-      try {
-        const j = await api.job(jId);
-        setResolveJob(j);
-        if (j.state === "ready") {
-          if (scheduleId) setResolution(await api.resolution(scheduleId));
+  const pollResolveJob = (jId: string) => {
+    subscribeJob(jId, async (j) => {
+      setResolveJob(j);
+      if (j.state === "ready" && scheduleId) {
+        try {
+          setResolution(await api.resolution(scheduleId));
           setStatus("Resolution complete.");
-          return;
+        } catch (e) {
+          setStatus(`Failed to fetch resolution: ${(e as Error).message}`);
         }
-        if (j.state === "failed") {
-          setStatus(`Resolution failed: ${j.error ?? "unknown"}`);
-          return;
-        }
-      } catch (e) {
-        setStatus(`Polling error: ${(e as Error).message}`);
-        return;
+      } else if (j.state === "failed") {
+        setStatus(`Resolution failed: ${j.error ?? "unknown"}`);
       }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
+    });
   };
 
   const onGenerateAnimation = async () => {
@@ -174,30 +183,20 @@ export function SchedulePage() {
     }
   };
 
-  const pollAnimationJob = async (jId: string) => {
-    while (true) {
-      try {
-        const j = await api.job(jId);
-        setGenJob(j);
-        if (j.state === "ready") {
-          setStatus("Animation ready.");
-          if (projectId && modelId && versionId && scheduleId) {
-            nav(
-              `/projects/${projectId}/models/${modelId}/versions/${versionId}/schedule/${scheduleId}/animation`,
-            );
-          }
-          return;
+  const pollAnimationJob = (jId: string) => {
+    subscribeJob(jId, (j) => {
+      setGenJob(j);
+      if (j.state === "ready") {
+        setStatus("Animation ready.");
+        if (projectId && modelId && versionId && scheduleId) {
+          nav(
+            `/projects/${projectId}/models/${modelId}/versions/${versionId}/schedule/${scheduleId}/animation`,
+          );
         }
-        if (j.state === "failed") {
-          setStatus(`Animation failed: ${j.error ?? "unknown"}`);
-          return;
-        }
-      } catch (e) {
-        setStatus(`Polling error: ${(e as Error).message}`);
-        return;
+      } else if (j.state === "failed") {
+        setStatus(`Animation failed: ${j.error ?? "unknown"}`);
       }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
+    });
   };
 
   return (

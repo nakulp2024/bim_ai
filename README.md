@@ -2,16 +2,15 @@
 
 A web app that adds an AI-driven 4D animation layer on top of [Speckle](https://speckle.systems/). Users connect their existing Speckle projects (Revit / Rhino / ArchiCAD / IFC via Speckle's native connectors), upload a construction schedule, and Claude generates a timeline that drives the Speckle viewer.
 
-## Status: M2 — Schedule upload + AI column mapping
+## Status: M5 — End-to-end demo
 
-Adds the first AI layer on top of M1:
+The full pipeline works:
 
-- **Schedule upload** (CSV / Excel) bound to a Speckle version, parsed with pandas.
-- **Speckle catalog summary** built server-side via `specklepy` (counts per category and storey, sample elements with `applicationId` / `family` / `type`).
-- **Claude column mapping**: a Celery worker calls `claude-sonnet-4-6` with `messages.parse()` and a Pydantic schema to propose how columns map to canonical roles + a join strategy.
-- **Mapping confirmation UI**: editable role table with confidence badge; saves a confirmed mapping back to Postgres.
-
-M1 features still work: Speckle OAuth, project / model / version browsing, embedded `@speckle/viewer`.
+1. **M1** — sign in via Speckle OAuth, browse projects → models → versions, view a model in `@speckle/viewer`.
+2. **M2** — upload a CSV / Excel schedule. A Celery worker fetches the Speckle catalog with `specklepy`, calls `claude-sonnet-4-6` via `messages.parse()` for column mapping, and shows you an editable proposal with a confidence badge.
+3. **M3** — saving the mapping kicks off a deterministic SQL join (by `applicationId`, `category_and_level`, or `type_and_level`) against an `element_index` table built during M2; you see how many tasks and elements matched.
+4. **M4** — "Generate animation" runs Claude again to cluster tasks into 3-6 named, color-coded phases. The browser plays the animation through `FilteringExtension`, with play/pause/scrub/speed/legend.
+5. **M5** — job updates stream over SSE (Redis pub/sub from the worker), share-link button on the player, error states surfaced inline.
 
 ## Architecture
 
@@ -99,6 +98,10 @@ your project list, drill into a model and version, and see the viewer load it.
 | `GET  /schedules/{id}/mapping` | Latest mapping proposal + catalog summary |
 | `POST /schedules/{id}/mapping/confirm` | Persist the (possibly edited) confirmed mapping |
 | `GET  /jobs/{id}` | Job status for client polling |
+| `GET  /jobs/{id}/events` | Server-Sent Events stream of job state changes (token via `?token=`) |
+| `GET  /schedules/{id}/resolution` | Counts of resolved task→element links |
+| `POST /schedules/{id}/animation` | Queue a `generate_animation` job |
+| `GET  /schedules/{id}/animation` | Latest animation script + task→Speckle index |
 
 ## M2 setup
 
@@ -143,8 +146,19 @@ consume it to resolve schedule rows to Speckle object IDs.
   webhooks, and the dedicated file-import service are omitted; add the
   corresponding `speckle/*` images if you want them.
 
-## What's next (M3)
+## What's next (post-MVP)
 
-Deterministic row-to-element resolution by the chosen join strategy, surfaced
-as a "X / Y rows matched" report with samples of unmatched rows. Then M4 starts
-the animation generation pass.
+- `name_fuzzy` and `wbs_pattern` join strategies (currently no-ops in the
+  resolver — surface as 0 matches).
+- Per-row LLM fallback for unresolved rows (batched 50 at a time as the
+  architecture doc suggests).
+- Multiple activity types beyond `construct` (demolish, temporary works) with
+  distinct visual treatments.
+- Re-versioning: when a Speckle version changes, re-stitch animations using
+  `application_id` so the timeline survives model edits.
+- Snapshot / MP4 export of the timeline.
+- Encrypt Speckle tokens at rest (`cryptography` Fernet); mint short-lived,
+  scoped Speckle tokens for the viewer instead of handing the user's token to
+  the SPA.
+- Replace the `?token=` query param on the SSE endpoint with a cookie-bound
+  flow so JWTs aren't logged in proxy access logs.
