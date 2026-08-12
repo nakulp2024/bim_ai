@@ -1,164 +1,304 @@
-# BIM AI Platform
+# IFC → Construction Schedule Generator
 
-A web app that adds an AI-driven 4D animation layer on top of [Speckle](https://speckle.systems/). Users connect their existing Speckle projects (Revit / Rhino / ArchiCAD / IFC via Speckle's native connectors), upload a construction schedule, and Claude generates a timeline that drives the Speckle viewer.
+Upload an IFC model, profile what is actually in it, choose a **schedule level of detail**, and
+get a CPM-calculated construction programme you can edit and export to CSV, Excel, MS Project,
+Primavera P6 or JSON.
 
-## Status: M5 — End-to-end demo
-
-The full pipeline works:
-
-1. **M1** — sign in via Speckle OAuth, browse projects → models → versions, view a model in `@speckle/viewer`.
-2. **M2** — upload a CSV / Excel schedule. A Celery worker fetches the Speckle catalog with `specklepy`, calls `claude-sonnet-4-6` via `messages.parse()` for column mapping, and shows you an editable proposal with a confidence badge.
-3. **M3** — saving the mapping kicks off a deterministic SQL join (by `applicationId`, `category_and_level`, or `type_and_level`) against an `element_index` table built during M2; you see how many tasks and elements matched.
-4. **M4** — "Generate animation" runs Claude again to cluster tasks into 3-6 named, color-coded phases. The browser plays the animation through `FilteringExtension`, with play/pause/scrub/speed/legend.
-5. **M5** — job updates stream over SSE (Redis pub/sub from the worker), share-link button on the player, error states surfaced inline.
-
-## Architecture
+Every task keeps the list of source `GlobalId`s it was built from, so the output can drive 4D
+linking later.
 
 ```
-frontend/   Vite + React + TS + react-router + @speckle/viewer
-backend/    FastAPI + httpx + SQLAlchemy (asyncpg)
-            ├── Celery worker (sync SQLAlchemy + psycopg2 + specklepy + anthropic)
-            └── stores: users, schedule_uploads, mapping_proposals, jobs
-docker-compose.yml
-            ├── self-hosted Speckle (server + postgres + redis + minio)
-            └── our app (api + worker + postgres + redis + frontend)
+IFC file
+   ↓  parse          ifcopenshell → one flat record per element
+   ↓  filter         drop fasteners, openings, tiny parts (config/filters.yaml)
+   ↓  group          L1…L5 grouping, optional zone split
+   ↓  price          quantity ÷ (rate × crew) → duration (config/rates.yaml)
+   ↓  sequence       trade order, vertical logic, zone repetition (config/sequencing.yaml)
+   ↓  calculate      forward/backward CPM pass → dates, float, critical path
+   ↓  export         CSV · XLSX · MS Project XML · P6 XER · JSON
 ```
 
-Backend boundary discipline: we never copy Speckle model data into our DB. The
-only Speckle-derived data we persist is the per-user OAuth token, the Speckle
-catalog *summary* used for one mapping pass (counts and a few sample elements),
-and pointers back to Speckle by project / model / version / applicationId.
+---
 
-## Run
+## Quick start
 
-### 1. Boot the stack
+Two processes: the API on `:8000` and the UI on `:5173`.
+
+### Backend
 
 ```bash
-docker compose up --build
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+uvicorn app.main:app --reload --port 8000
 ```
 
-Wait for Speckle's first boot — the server image migrates its DB and creates
-the MinIO bucket. Healthy when:
+Interactive API docs at <http://localhost:8000/docs>.
 
-- `http://localhost:3000` shows the Speckle login page
-- `http://localhost:8000/health` returns `{"status":"ok"}`
-
-### 2. Register an OAuth app in Speckle
-
-This is the one manual step — Speckle requires a logged-in user to create
-OAuth apps:
-
-1. Open `http://localhost:3000` and sign up (any email; the local server
-   doesn't actually deliver mail unless you wire one up).
-2. Go to **Profile → Developer Settings → Applications → New application**.
-3. Fill in:
-   - **Name**: `BIM AI (dev)`
-   - **Redirect URL**: `http://localhost:8000/auth/speckle/callback`
-   - **Scopes**: at minimum `streams:read`, `users:read`, `profile:read`,
-     `streams:write` (the last only if you later want to write filters back).
-4. Copy the **App ID** and **App Secret** Speckle gives you.
-5. Create `.env` at the repo root from `.env.example` and paste them in:
-   ```
-   SPECKLE_APP_ID=...
-   SPECKLE_APP_SECRET=...
-   ```
-6. Restart the backend: `docker compose restart app-backend`.
-
-### 3. Push a model into Speckle
-
-The OAuth flow works on an empty Speckle account, but the viewer needs
-something to render. Quickest paths:
-
-- Use a Speckle **connector** (Revit, Rhino, etc.) from a desktop app pointing
-  at `http://localhost:3000`, or
-- Drag an `.ifc` file onto a Speckle project — the bundled
-  `speckle-fileimport-service` is **not** included in this minimal compose;
-  enable it by adding `speckle/speckle-fileimport-service` if you want
-  drag-and-drop IFC uploads, or
-- Use the public sample data: clone an existing public project from
-  speckle.xyz with the Speckle CLI.
-
-### 4. Use the app
-
-Open `http://localhost:5173` and **Sign in with Speckle**. You should land on
-your project list, drill into a model and version, and see the viewer load it.
-
-## Endpoints
-
-| Path | Notes |
-|---|---|
-| `GET  /auth/speckle/start` | Begin OAuth (redirects to Speckle) |
-| `GET  /auth/speckle/callback` | OAuth return, mints app JWT, redirects to SPA |
-| `GET  /me` | Current user, including their Speckle token for the viewer |
-| `GET  /speckle/projects` | GraphQL passthrough — `activeUser.projects` |
-| `GET  /speckle/projects/{id}/models` | `project.models` |
-| `GET  /speckle/projects/{id}/models/{mid}/versions` | `model.versions` |
-| `POST /schedules` (multipart) | Upload schedule, queue mapping job |
-| `GET  /schedules` | List the user's uploaded schedules (optionally filter by `speckle_version_id`) |
-| `GET  /schedules/{id}/mapping` | Latest mapping proposal + catalog summary |
-| `POST /schedules/{id}/mapping/confirm` | Persist the (possibly edited) confirmed mapping |
-| `GET  /jobs/{id}` | Job status for client polling |
-| `GET  /jobs/{id}/events` | Server-Sent Events stream of job state changes (token via `?token=`) |
-| `GET  /schedules/{id}/resolution` | Counts of resolved task→element links |
-| `POST /schedules/{id}/animation` | Queue a `generate_animation` job |
-| `GET  /schedules/{id}/animation` | Latest animation script + task→Speckle index |
-
-## M2 setup
-
-In addition to the Speckle OAuth app from M1, M2 needs an Anthropic API key.
-Add it to `.env`:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-# CLAUDE_MODEL=claude-sonnet-4-6   # optional override
-```
-
-Restart the stack so the worker picks up the new key:
+### Frontend
 
 ```bash
-docker compose up -d --build app-backend app-worker
+cd frontend
+npm install
+npm run dev
 ```
 
-## Using the schedule flow
+Open <http://localhost:5173>. The Vite dev server proxies `/api` to `http://localhost:8000`, so
+there is nothing else to configure. Point it somewhere else with
+`VITE_API_TARGET=http://host:port npm run dev`.
 
-1. Sign in, drill into a project → model → version, click **Schedule →** in the
-   viewer top bar.
-2. Upload an Excel or CSV schedule.
-3. The page polls the job until it's ready (typically 5–20s once Claude
-   responds). You'll see a proposed mapping with a confidence badge.
-4. Edit roles / join strategy / Speckle property as needed, then **Save mapping**.
+### Tests
 
-The mapping is persisted against the (user, speckle_version_id) tuple. M3 will
-consume it to resolve schedule rows to Speckle object IDs.
+```bash
+cd backend && pytest          # 203 tests
+cd frontend && npm run lint   # tsc --noEmit
+```
 
-## Known M2 compromises
+The test suite builds its own small IFC model covering the awkward cases — assemblies, missing
+quantities, fasteners, orphaned elements, IFC2X3 — so no external fixture file is needed. The
+generator lives in `backend/tests/fixtures/sample_ifc.py` and can be run directly:
 
-- The Speckle access token is handed to the SPA via `/me`. A future milestone
-  should mint short-lived, narrowly-scoped tokens.
-- Speckle tokens and uploaded schedules are stored unencrypted. Wrap with
-  `cryptography` Fernet before this leaves dev.
-- Catalog traversal materialises the whole referenced object in worker memory.
-  For models above ~50k elements, switch to a streamed traversal or pre-cache.
-- No row-to-element resolution yet — that's M3.
-- The Dockerfiles run dev servers (`uvicorn --reload` not enabled, but `vite
-  dev`). Build production images separately when deploying.
-- The compose file ships the minimum Speckle services. Preview thumbnails,
-  webhooks, and the dedicated file-import service are omitted; add the
-  corresponding `speckle/*` images if you want them.
+```bash
+python backend/tests/fixtures/sample_ifc.py sample.ifc
+```
 
-## What's next (post-MVP)
+---
 
-- `name_fuzzy` and `wbs_pattern` join strategies (currently no-ops in the
-  resolver — surface as 0 matches).
-- Per-row LLM fallback for unresolved rows (batched 50 at a time as the
-  architecture doc suggests).
-- Multiple activity types beyond `construct` (demolish, temporary works) with
-  distinct visual treatments.
-- Re-versioning: when a Speckle version changes, re-stitch animations using
-  `application_id` so the timeline survives model edits.
-- Snapshot / MP4 export of the timeline.
-- Encrypt Speckle tokens at rest (`cryptography` Fernet); mint short-lived,
-  scoped Speckle tokens for the viewer instead of handing the user's token to
-  the SPA.
-- Replace the `?token=` query param on the SSE endpoint with a cookie-bound
-  flow so JWTs aren't logged in proxy access logs.
+## Level of detail
+
+The level is chosen by the user at run time; nothing about it is hardcoded. Before committing,
+`POST /api/projects/{id}/lod-preview` returns the exact task count each level would produce for
+*this* model, which is what the picker in the UI displays.
+
+| Level | Grouping key | Example task |
+|-------|--------------|--------------|
+| **L1** | Site → Building → Storey | `L02 – All works` |
+| **L2** | Storey × work package | `L02 – Superstructure` |
+| **L3** *(default)* | Storey × IfcClass / PredefinedType | `L02 – Columns` |
+| **L4** | Storey × zone × IfcTypeObject or material | `L02 – 200mm Blockwork Solid Walls` |
+| **L5** | One task per element | `L02 – Column C-12` |
+
+**Optional secondary zone split.** Any level can be further split by `IfcZone` /
+`IfcSpatialZone`, or by a property in any Pset (e.g. `Pset_WallCommon.Sector`). The profile
+endpoint reports which zone sources the model actually offers, so the picker only shows real
+options. Turning a zone split on also activates the zone-repetition sequencing rule.
+
+**L5 never emits a trivial task.** An element with no measurable quantity, or one below
+`min_net_volume_m3 × l5_trivial_volume_factor`, is folded back into its L4 group rather than
+becoming a task of its own. The affected tasks are flagged `aggregated_trivial` and explain
+themselves in the run report.
+
+---
+
+## Configuration
+
+Four YAML files in `backend/config/` hold every rule. None of this logic lives in Python.
+
+| File | What it controls |
+|------|------------------|
+| `filters.yaml` | Which elements are noise: excluded classes, assembly collapsing, size thresholds, name patterns |
+| `work_packages.yaml` | How elements map to Substructure / Superstructure / Envelope / MEP / Interior / Finishes |
+| `rates.yaml` | The productivity rate library that turns quantities into durations |
+| `sequencing.yaml` | Trade order, within-storey links, vertical logic, zone repetition, the default calendar |
+
+To override them, copy the directory, edit your copy, and point the app at it:
+
+```bash
+IFCSCHED_CONFIG_DIR=/path/to/my-config uvicorn app.main:app
+```
+
+Files missing from your directory fall back to the packaged defaults, so you can override just
+`rates.yaml` and inherit the rest. `GET /api/config` returns the merged, active configuration.
+
+### Noise filtering
+
+Nuts and bolts never become tasks. `filters.yaml` removes, and the run report explains:
+
+- **Excluded classes** — `IfcMechanicalFastener`, `IfcFastener`, `IfcDiscreteAccessory`,
+  `IfcBuildingElementPart`, `IfcOpeningElement`, `IfcVirtualElement`, `IfcAnnotation`, `IfcGrid`,
+  `IfcSpace`. Matching walks the full IFC class hierarchy, so excluding a supertype covers its
+  subtypes. `schedulable_overrides` can force any class back in or out.
+- **Assembly collapsing** — `IfcElementAssembly` children fold into the parent, which inherits the
+  summed quantities of its children.
+- **Size threshold** — elements below `min_net_volume_m3` *and* `min_bbox_diagonal_m` roll up into
+  their parent group. An element with no measurement at all is never dropped by size (nothing
+  proves it is trivial), and `never_filter_classes` protects small-but-real items like doors.
+- **Name patterns** — regexes against Name / ObjectType / type name.
+
+### Rate library and the fallback chain
+
+```
+duration_days = ceil(quantity / (output_per_crew_day × crew))   floored at min_duration_days
+```
+
+Rates are looked up in order, and the link that matched sets the task's confidence:
+
+| Order | Match | Confidence |
+|-------|-------|------------|
+| 1 | class + predefined type + material pattern | `high` |
+| 2 | class only | `medium` |
+| 3 | `default` | `low` |
+| 4 | `count_fallback` (rule's unit has no quantity) | `low` |
+
+Confidence is capped at `medium` when the quantities were derived from geometry rather than read
+from `Qto_*BaseQuantities`, and forced to `low` when there is no measurement at all.
+
+Rates are editable in the UI and persisted **per project** — the packaged `rates.yaml` is never
+modified. Saving repricing every task except those whose duration you edited by hand.
+
+### Sequencing
+
+Every relationship traces back to a rule, and the run report breaks links down by origin.
+
+- **`within_storey`** — explicit links between work packages in the same storey/zone bucket, with
+  type (FS/SS/FF/SF) and lag. Falls back to chaining `trade_order` with FS+0 if left empty.
+- **`vertical`** — storey N's structure finishes before storey N+1's starts, ordered by elevation.
+  Driving packages are treated as one train per storey, so a ground floor whose structure is
+  Substructure still gates the floor above whose structure is Superstructure.
+- **`zone_repetition`** — staggers the same package across zones instead of running them in
+  parallel, when a zone split is active.
+- **`within_bucket`** — orders the several tasks that share one bucket, using `class_order`.
+
+### Calendar
+
+Configurable work week (default Mon–Fri), start date and holiday list. CPM runs in integer
+working-day offsets; the calendar converts them to dates at the end. Changing the calendar on an
+existing schedule reschedules it without regenerating.
+
+---
+
+## Data extracted per element
+
+`GlobalId`, IfcClass and the full class hierarchy, PredefinedType, Name, ObjectType, IfcTypeObject
+name, material (single / layered / profile / constituent), spatial container via
+`IfcRelContainedInSpatialStructure`, storey elevation, assembly parent, zone membership,
+classification references (Uniclass / OmniClass / assembly codes), property sets, and quantities
+from `Qto_*BaseQuantities` — all converted to SI using the file's own unit scale.
+
+**Missing base quantities** fall back to `ifcopenshell.geom`: bounding box dimensions and mesh
+volume, with the task flagged `quantity_source: derived`. Derivation is capped at
+`IFCSCHED_MAX_DERIVED_GEOMETRY` elements (default 20 000) so a huge model does not stall, and
+elements with no geometric representation are recorded as unmeasured rather than counted as
+failures.
+
+**Nothing crashes on a bad IFC.** Every extraction step is individually guarded — a broken
+relationship or malformed representation degrades that one element and is recorded in the report.
+A file that cannot be opened at all returns an empty result plus the reason.
+
+---
+
+## The run report
+
+Written per run and available at `GET /api/projects/{id}/run-report` (and as a sheet in the XLSX
+export). It answers: what was read, what was thrown away and why, what was built.
+
+- **Parse** — schema, products seen, elements read, quantities by source, quantity coverage %,
+  geometry failures, errors and warnings
+- **Filter** — elements in / kept / removed, broken down by reason *and* by IFC class, with example
+  GlobalIds and the total quantity that was rolled up rather than dropped
+- **Grouping** — level, zone split, task count, elements represented, trivial groups aggregated
+- **Durations** — confidence split, which link of the fallback chain each task used, coverage %
+- **Sequencing** — link count by originating rule
+- **CPM** — project duration, finish date, critical task count, plus any cycles broken or links
+  dropped
+
+---
+
+## Exports
+
+| Format | Notes |
+|--------|-------|
+| **CSV** | One row per task, predecessors as `ID FS+2`, GlobalIds semicolon-separated |
+| **XLSX** | Formatted schedule sheet with critical tasks highlighted, plus a run-report sheet |
+| **MS Project XML** | MSPDI with calendar, WBS outline, typed predecessor links and lags; GlobalIds ride in the task Notes field |
+| **Primavera P6 XER** | `PROJECT`, `CALENDAR`, `PROJWBS`, `TASK`, `TASKPRED` tables, plus an `IFCSOURCE` table carrying the GlobalIds |
+| **JSON** | Lossless: tasks, logic, quantities, confidence, float, and `source_global_ids` for 4D linking |
+
+---
+
+## Optional LLM layer
+
+**Off by default, and the core pipeline is fully deterministic without it.** Nothing in
+`app/schedule/` imports `app/llm/` at module scope; it is loaded lazily and only when enabled, and
+any failure inside it is caught and logged rather than propagated.
+
+```bash
+export IFCSCHED_LLM_ENABLED=true
+export ANTHROPIC_API_KEY=sk-...
+pip install anthropic
+```
+
+It can then (a) rename tasks more naturally, (b) classify unrecognised
+`IfcBuildingElementProxy` / ObjectType strings into work packages, and (c) suggest missing logic
+links. Suggested links are **returned, not applied** — the calculated programme only ever contains
+links you or the rules put there. Anything the layer changes is recorded under the task's
+`llm_notes` alongside the original value.
+
+---
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `IFCSCHED_CONFIG_DIR` | `backend/config` | Override directory for the YAML rule files |
+| `IFCSCHED_DATA_DIR` | `./data` | Uploads, element stores and the SQLite database |
+| `IFCSCHED_DATABASE_URL` | `sqlite:///<data>/ifcsched.db` | SQLAlchemy URL |
+| `IFCSCHED_MAX_UPLOAD_MB` | `1024` | Upload size limit |
+| `IFCSCHED_MAX_DERIVED_GEOMETRY` | `20000` | Cap on geometry-derived quantities per run |
+| `IFCSCHED_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins |
+| `IFCSCHED_LLM_ENABLED` | `false` | Enables the optional LLM layer |
+| `IFCSCHED_LLM_MODEL` | `claude-sonnet-5` | Model used by the LLM layer |
+| `ANTHROPIC_API_KEY` | — | Required when the LLM layer is enabled |
+
+---
+
+## API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/projects` | Create a project |
+| `POST` | `/api/projects/{id}/upload` | Upload an IFC; returns a `job_id` |
+| `GET` | `/api/jobs/{job_id}` | Poll background-job progress |
+| `GET` | `/api/projects/{id}/profile` | Model profile + parse report |
+| `POST` | `/api/projects/{id}/lod-preview` | Predicted task count for every level |
+| `POST` | `/api/projects/{id}/schedule` | Generate; returns a `job_id` |
+| `GET` | `/api/projects/{id}/schedule` | Tasks, links, calendar and report |
+| `PATCH` | `/api/projects/{id}/tasks/{task_id}` | Rename, change duration/crew, re-link |
+| `DELETE` | `/api/projects/{id}/tasks/{task_id}` | Delete a task and its links |
+| `POST`/`DELETE` | `/api/projects/{id}/links` | Add or remove a single link |
+| `PUT` | `/api/projects/{id}/calendar` | Change start date, work week or holidays |
+| `GET`/`PUT` | `/api/projects/{id}/rates` | Read or override the rate library |
+| `GET` | `/api/projects/{id}/export/{fmt}` | `csv` · `xlsx` · `mspdi` · `xer` · `json` |
+| `GET` | `/api/projects/{id}/run-report` | The per-run report on its own |
+| `GET` | `/api/config` | The merged, active configuration |
+
+Long parses run as background jobs on a thread pool, with progress written to the database on
+every step so `/api/jobs/{id}` works across workers and survives a client reconnect. Any edit —
+duration, link, calendar, rate — re-runs CPM and returns the whole recalculated schedule.
+
+---
+
+## Layout
+
+```
+backend/
+  app/
+    ifc/          parser.py (IFC → records), model.py (record shape), profile.py
+    schedule/     filtering · lod · durations · sequencing · cpm · calendar · pipeline
+    exports/      tabular (CSV/XLSX) · msproject · p6 · jsonpkg
+    llm/          optional, lazily loaded, off by default
+    routes/       projects · schedule · rates · exports · jobs · config
+    db.py         SQLAlchemy models; element frames are stored as gzipped JSON on disk
+    jobs.py       thread-pool job manager with a pollable progress endpoint
+  config/         filters · work_packages · rates · sequencing  (all user-overridable)
+  tests/          203 tests, plus the sample-IFC generator
+frontend/
+  src/
+    steps/        UploadStep · ProfileStep · LodPicker
+    components/   GanttChart · TaskTable · RatesEditor · RunReport · RelinkDialog · ExportBar
+    components/ui shadcn/ui-style primitives (vendored, built on Radix)
+    lib/          api client, shared types, helpers
+```
+
+The UI components follow shadcn/ui conventions and are vendored into the repo rather than pulled
+in by the CLI, so `npm install` is all that is needed to build.

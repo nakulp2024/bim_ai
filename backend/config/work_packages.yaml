@@ -1,0 +1,97 @@
+# Maps IFC entities to the six work packages used by L2 grouping and by the
+# sequencing rules. First matching rule wins; rules are evaluated top to bottom.
+#
+# A rule may match on:
+#   ifc_class        - exact class name or IFC inheritance (is_a semantics)
+#   predefined_type  - exact PredefinedType, or a list of them
+#   name_pattern     - regex tested against Name / ObjectType / type name
+#   below_elevation  - storey elevation strictly below this value (metres)
+
+packages:
+  - Substructure
+  - Superstructure
+  - Envelope
+  - MEP
+  - Interior
+  - Finishes
+
+rules:
+  # --- Substructure -------------------------------------------------------
+  - match: {ifc_class: IfcFooting}
+    package: Substructure
+  - match: {ifc_class: IfcPile}
+    package: Substructure
+  - match: {ifc_class: IfcSlab, predefined_type: [BASESLAB, GROUNDSLAB]}
+    package: Substructure
+  - match: {ifc_class: IfcWall, below_elevation: 0.0}
+    package: Substructure
+
+  # --- Superstructure -----------------------------------------------------
+  - match: {ifc_class: IfcColumn}
+    package: Superstructure
+  - match: {ifc_class: IfcBeam}
+    package: Superstructure
+  - match: {ifc_class: IfcSlab}
+    package: Superstructure
+  - match: {ifc_class: IfcStair}
+    package: Superstructure
+  - match: {ifc_class: IfcRamp}
+    package: Superstructure
+  - match: {ifc_class: IfcMember}
+    package: Superstructure
+  - match: {ifc_class: IfcElementAssembly}
+    package: Superstructure
+
+  # --- Envelope -----------------------------------------------------------
+  - match: {ifc_class: IfcCurtainWall}
+    package: Envelope
+  - match: {ifc_class: IfcRoof}
+    package: Envelope
+  - match: {ifc_class: IfcWall, predefined_type: [PARAPET]}
+    package: Envelope
+  - match: {ifc_class: IfcWall, name_pattern: "(?i)(external|facade|façade|cladding|ext\\b)"}
+    package: Envelope
+  - match: {ifc_class: IfcWindow}
+    package: Envelope
+  - match: {ifc_class: IfcDoor, name_pattern: "(?i)(external|entrance)"}
+    package: Envelope
+  - match: {ifc_class: IfcPlate, name_pattern: "(?i)(glaz|panel|cladding)"}
+    package: Envelope
+
+  # --- MEP ----------------------------------------------------------------
+  - match: {ifc_class: IfcDistributionElement}
+    package: MEP
+  - match: {ifc_class: IfcFlowSegment}
+    package: MEP
+  - match: {ifc_class: IfcFlowTerminal}
+    package: MEP
+  - match: {ifc_class: IfcFlowFitting}
+    package: MEP
+  - match: {ifc_class: IfcEnergyConversionDevice}
+    package: MEP
+  - match: {ifc_class: IfcDistributionControlElement}
+    package: MEP
+  - match: {ifc_class: IfcCableCarrierSegment}
+    package: MEP
+
+  # --- Interior -----------------------------------------------------------
+  - match: {ifc_class: IfcWall, predefined_type: [PARTITIONING, MOVABLE]}
+    package: Interior
+  - match: {ifc_class: IfcWall}
+    package: Interior
+  - match: {ifc_class: IfcDoor}
+    package: Interior
+  - match: {ifc_class: IfcRailing}
+    package: Interior
+  - match: {ifc_class: IfcFurniture}
+    package: Interior
+
+  # --- Finishes -----------------------------------------------------------
+  - match: {ifc_class: IfcCovering}
+    package: Finishes
+  - match: {ifc_class: IfcSlab, predefined_type: [FLOOR], name_pattern: "(?i)(finish|screed|topping)"}
+    package: Finishes
+
+# Anything that matches no rule lands here. IfcBuildingElementProxy usually
+# ends up here, which is exactly what the optional LLM classifier can improve.
+fallback_package: Interior

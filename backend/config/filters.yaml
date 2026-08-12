@@ -1,0 +1,54 @@
+# Noise filtering rules applied BEFORE grouping.
+# Copy this file, edit it, and point IFCSCHED_CONFIG_DIR at your copy to override.
+
+# Entities of these classes are never scheduled. Subclasses are matched too
+# (is_a() semantics), so IfcFastener also covers IfcMechanicalFastener.
+excluded_classes:
+  - IfcMechanicalFastener
+  - IfcFastener
+  - IfcDiscreteAccessory
+  - IfcBuildingElementPart
+  - IfcOpeningElement
+  - IfcVirtualElement
+  - IfcAnnotation
+  - IfcGrid
+  - IfcSpace
+
+# Per-class override of the exclusion list above. `true` forces a class back in,
+# `false` pushes it out. Takes precedence over `excluded_classes`.
+schedulable_overrides:
+  IfcSpace: false
+  IfcFurniture: true
+
+# Children of an IfcElementAssembly are folded into the parent assembly, which
+# then carries the summed quantities of its children.
+collapse_assemblies: true
+
+# Elements smaller than every populated threshold below roll up into their
+# parent group rather than becoming tasks of their own. An element with no
+# measurable quantity at all is never dropped by size (we cannot prove it is
+# trivial), it is only dropped by the class rules above.
+size_threshold:
+  enabled: true
+  min_net_volume_m3: 0.01
+  min_bbox_diagonal_m: 0.30
+  # Restrict the size test to these classes; empty/omitted means "all classes".
+  only_classes: []
+  # Never size-filter these, however small they are.
+  never_filter_classes:
+    - IfcDoor
+    - IfcWindow
+    - IfcSanitaryTerminal
+    - IfcLightFixture
+
+# At L5 (one task per element) a group that would contain a single trivial
+# element is merged back into its L4 group instead. An element counts as
+# trivial at L5 when it has no measurable quantity at all, or its NetVolume is
+# below min_net_volume_m3 * l5_trivial_volume_factor.
+aggregate_trivial_at_l5: true
+l5_trivial_volume_factor: 3.0
+
+# Elements whose Name/ObjectType matches any of these regexes are dropped.
+name_exclude_patterns:
+  - "(?i)^dummy"
+  - "(?i)placeholder"

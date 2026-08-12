@@ -1,0 +1,203 @@
+# Productivity rate library for the duration engine.
+#
+#   duration_days = ceil(quantity / (output_per_crew_day * crew))
+#                   clamped to >= min_duration_days
+#
+# Lookup order (first hit wins) and the confidence it produces:
+#   1. a rule matching class + predefined type + material pattern   -> high
+#   2. a rule matching class (+ predefined type)                    -> medium
+#   3. `default`                                                    -> low
+#   4. `count_fallback`, used when the rule's unit has no quantity  -> low
+#
+# unit is one of: m3 | m2 | m | ea
+
+default:
+  unit: ea
+  output_per_crew_day: 10.0
+  default_crew: 1
+  min_duration_days: 1
+
+count_fallback:
+  unit: ea
+  output_per_crew_day: 20.0
+  default_crew: 1
+  min_duration_days: 1
+
+rules:
+  - id: footing-concrete
+    match: {ifc_class: IfcFooting}
+    unit: m3
+    output_per_crew_day: 14.0
+    default_crew: 2
+    min_duration_days: 2
+
+  - id: pile
+    match: {ifc_class: IfcPile}
+    unit: ea
+    output_per_crew_day: 6.0
+    default_crew: 1
+    min_duration_days: 2
+
+  - id: slab-ground
+    match: {ifc_class: IfcSlab, predefined_type: [BASESLAB, GROUNDSLAB]}
+    unit: m3
+    output_per_crew_day: 18.0
+    default_crew: 3
+    min_duration_days: 2
+
+  - id: slab-suspended-rc
+    match: {ifc_class: IfcSlab, predefined_type: [FLOOR], material_pattern: "(?i)(concrete|rc\\b)"}
+    unit: m3
+    output_per_crew_day: 12.0
+    default_crew: 3
+    min_duration_days: 3
+
+  - id: slab-any
+    match: {ifc_class: IfcSlab}
+    unit: m3
+    output_per_crew_day: 15.0
+    default_crew: 3
+    min_duration_days: 2
+
+  - id: column-concrete
+    match: {ifc_class: IfcColumn, material_pattern: "(?i)concrete"}
+    unit: m3
+    output_per_crew_day: 6.0
+    default_crew: 2
+    min_duration_days: 2
+
+  - id: column-steel
+    match: {ifc_class: IfcColumn, material_pattern: "(?i)steel"}
+    unit: ea
+    output_per_crew_day: 8.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: column-any
+    match: {ifc_class: IfcColumn}
+    unit: m3
+    output_per_crew_day: 5.0
+    default_crew: 2
+    min_duration_days: 2
+
+  - id: beam-any
+    match: {ifc_class: IfcBeam}
+    unit: m3
+    output_per_crew_day: 7.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: wall-blockwork
+    match: {ifc_class: IfcWall, material_pattern: "(?i)(block|masonry|brick)"}
+    unit: m2
+    output_per_crew_day: 11.0
+    default_crew: 2
+    min_duration_days: 2
+
+  - id: wall-concrete
+    match: {ifc_class: IfcWall, material_pattern: "(?i)concrete"}
+    unit: m3
+    output_per_crew_day: 9.0
+    default_crew: 3
+    min_duration_days: 2
+
+  - id: wall-partition-stud
+    match:
+      ifc_class: IfcWall
+      predefined_type: [PARTITIONING]
+      material_pattern: "(?i)(gypsum|plasterboard|stud|drywall)"
+    unit: m2
+    output_per_crew_day: 22.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: wall-any
+    match: {ifc_class: IfcWall}
+    unit: m2
+    output_per_crew_day: 15.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: curtain-wall
+    match: {ifc_class: IfcCurtainWall}
+    unit: m2
+    output_per_crew_day: 20.0
+    default_crew: 3
+    min_duration_days: 3
+
+  - id: roof
+    match: {ifc_class: IfcRoof}
+    unit: m2
+    output_per_crew_day: 40.0
+    default_crew: 3
+    min_duration_days: 2
+
+  - id: window
+    match: {ifc_class: IfcWindow}
+    unit: ea
+    output_per_crew_day: 9.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: door
+    match: {ifc_class: IfcDoor}
+    unit: ea
+    output_per_crew_day: 8.0
+    default_crew: 1
+    min_duration_days: 1
+
+  - id: covering-finish
+    match: {ifc_class: IfcCovering}
+    unit: m2
+    output_per_crew_day: 45.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: stair
+    match: {ifc_class: IfcStair}
+    unit: ea
+    output_per_crew_day: 0.5
+    default_crew: 2
+    min_duration_days: 2
+
+  - id: railing
+    match: {ifc_class: IfcRailing}
+    unit: m
+    output_per_crew_day: 25.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: duct
+    match: {ifc_class: IfcDuctSegment}
+    unit: m
+    output_per_crew_day: 30.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: pipe
+    match: {ifc_class: IfcPipeSegment}
+    unit: m
+    output_per_crew_day: 35.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: cable-carrier
+    match: {ifc_class: IfcCableCarrierSegment}
+    unit: m
+    output_per_crew_day: 40.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: mep-terminal
+    match: {ifc_class: IfcFlowTerminal}
+    unit: ea
+    output_per_crew_day: 12.0
+    default_crew: 2
+    min_duration_days: 1
+
+  - id: equipment
+    match: {ifc_class: IfcEnergyConversionDevice}
+    unit: ea
+    output_per_crew_day: 1.0
+    default_crew: 2
+    min_duration_days: 2

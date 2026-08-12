@@ -1,0 +1,71 @@
+# Rule-based sequencing. No relationship logic is hardcoded in Python; every
+# link the engine emits comes from a rule in this file.
+
+# Canonical trade order inside one storey (and one zone, when a zone split is
+# active). MEP appears twice: rough-in before partitions close up, fit-out after.
+trade_order:
+  - Substructure
+  - Superstructure
+  - Envelope
+  - MEP           # rough-in
+  - Interior      # partitions
+  - Finishes
+
+# Explicit links between work packages within the same storey/zone bucket.
+# `from`/`to` are work-package names, `type` is FS|SS|FF|SF, `lag` is in
+# working days (may be negative). If this list is empty the engine falls back
+# to chaining consecutive entries of `trade_order` with FS + 0 lag.
+within_storey:
+  - {from: Substructure,   to: Superstructure, type: FS, lag: 0}
+  - {from: Superstructure, to: Envelope,       type: SS, lag: 3}
+  - {from: Superstructure, to: MEP,            type: SS, lag: 5}
+  - {from: MEP,            to: Interior,       type: SS, lag: 2}
+  - {from: Envelope,       to: Interior,       type: FS, lag: 0}
+  - {from: Interior,       to: Finishes,       type: FS, lag: 1}
+  - {from: MEP,            to: Finishes,       type: FF, lag: 2}
+
+# Storey N must top out before storey N+1 starts, ordered by elevation.
+vertical:
+  enabled: true
+  # Only these packages drive the vertical chain; everything else is pulled
+  # along by its within-storey predecessors.
+  driving_packages: [Substructure, Superstructure]
+  type: FS
+  lag: 0
+
+# When a zone split is active, repeat the same package across zones as a
+# staggered train instead of running them all in parallel.
+zone_repetition:
+  enabled: true
+  type: SS
+  lag: 2
+  # Packages that should NOT be staggered (they run zone-parallel).
+  exclude_packages: [Substructure]
+
+# Ordering inside a single bucket (e.g. several L3 tasks that are all
+# Superstructure on L02). `parallel` emits no links; `chain` links them FS.
+within_bucket:
+  mode: chain
+  type: SS
+  lag: 1
+  # Class-level ordering hint used to sort tasks inside a bucket before
+  # chaining. Unlisted classes sort after listed ones, alphabetically.
+  class_order:
+    - IfcFooting
+    - IfcPile
+    - IfcColumn
+    - IfcWall
+    - IfcBeam
+    - IfcSlab
+    - IfcStair
+    - IfcRoof
+    - IfcCurtainWall
+    - IfcWindow
+    - IfcDoor
+    - IfcCovering
+
+calendar:
+  # 0 = Monday ... 6 = Sunday
+  work_days: [0, 1, 2, 3, 4]
+  start_date: null        # null -> today, or "YYYY-MM-DD"
+  holidays: []            # ["2026-12-25", "2026-12-26"]

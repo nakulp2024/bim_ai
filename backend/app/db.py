@@ -1,155 +1,238 @@
+"""SQLite persistence via SQLAlchemy.
+
+Element frames are large, so they live on disk as gzipped JSON next to the
+uploaded IFC; the database holds project metadata, the generated schedule and
+per-project rate overrides.
+"""
+
 from __future__ import annotations
 
-from datetime import datetime
+import gzip
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+import pandas as pd
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
-from .config import settings
+from .config import get_settings
+from .util import normalize_frame
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class User(Base):
-    __tablename__ = "users"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    speckle_user_id: Mapped[str] = mapped_column(String, unique=True, index=True)
-    name: Mapped[str | None] = mapped_column(String, nullable=True)
-    email: Mapped[str | None] = mapped_column(String, nullable=True)
-    avatar: Mapped[str | None] = mapped_column(String, nullable=True)
-    speckle_access_token: Mapped[str] = mapped_column(String)
-    speckle_refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
-    speckle_token_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
-class ScheduleUpload(Base):
-    __tablename__ = "schedule_uploads"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
-    speckle_project_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_model_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_version_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_referenced_object: Mapped[str | None] = mapped_column(String, nullable=True)
-    filename: Mapped[str] = mapped_column(String)
-    content_sha256: Mapped[str] = mapped_column(String(64), index=True)
-    storage_path: Mapped[str] = mapped_column(String)
-    headers: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    sample_rows: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
-    row_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+class Project(Base):
+    __tablename__ = "projects"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    ifc_filename = Column(String(400))
+    ifc_path = Column(String(800))
+    ifc_schema = Column(String(40))
+    element_count = Column(Integer, default=0)
+
+    status = Column(String(40), default="created")  # created|parsing|parsed|scheduling|ready|failed
+    parse_report = Column(JSON, default=dict)
+    profile = Column(JSON, default=dict)
+    rate_overrides = Column(JSON, default=dict)
+    schedule_options = Column(JSON, default=dict)
+    error = Column(Text)
+
+    schedule = relationship(
+        "ScheduleRecord",
+        back_populates="project",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
 
-
-class MappingProposal(Base):
-    __tablename__ = "mapping_proposals"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    schedule_id: Mapped[str] = mapped_column(
-        String, ForeignKey("schedule_uploads.id"), index=True
-    )
-    proposed: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    join_strategy: Mapped[str] = mapped_column(String)
-    confidence: Mapped[float] = mapped_column(Float)
-    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
-    catalog_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    confirmed: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "ifc_filename": self.ifc_filename,
+            "ifc_schema": self.ifc_schema,
+            "element_count": self.element_count,
+            "status": self.status,
+            "error": self.error,
+            "has_schedule": self.schedule is not None,
+        }
 
 
-class Job(Base):
+class ScheduleRecord(Base):
+    __tablename__ = "schedules"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), unique=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    level = Column(String(4), default="L3")
+    zone_split = Column(String(120))
+    tasks = Column(JSON, default=list)
+    links = Column(JSON, default=list)
+    calendar = Column(JSON, default=dict)
+    report = Column(JSON, default=dict)
+    options = Column(JSON, default=dict)
+    project_duration_days = Column(Float, default=0.0)
+
+    project = relationship("Project", back_populates="schedule")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "level": self.level,
+            "zone_split": self.zone_split,
+            "tasks": self.tasks or [],
+            "links": self.links or [],
+            "calendar": self.calendar or {},
+            "report": self.report or {},
+            "options": self.options or {},
+            "project_duration_days": self.project_duration_days,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class JobRecord(Base):
     __tablename__ = "jobs"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-    kind: Mapped[str] = mapped_column(String, index=True)
-    state: Mapped[str] = mapped_column(String, index=True)  # queued|running|ready|failed
-    progress: Mapped[float | None] = mapped_column(Float, nullable=True)
-    message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+
+    id = Column(String(40), primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"))
+    kind = Column(String(40))  # parse | schedule
+    status = Column(String(20), default="queued")  # queued|running|done|failed
+    progress = Column(Float, default=0.0)
+    message = Column(String(400), default="")
+    error = Column(Text)
+    result = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "kind": self.kind,
+            "status": self.status,
+            "progress": round(float(self.progress or 0.0), 4),
+            "message": self.message or "",
+            "error": self.error,
+            "result": self.result or {},
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
-class ElementIndex(Base):
-    """One row per IfcProduct/IfcProduct-equivalent in a Speckle version.
-
-    Built from the catalog walk; powers row-to-element resolution.
-    Keyed by (user_id, project_id, version_id) — different versions of the
-    same model get distinct entries so we can re-stitch animations.
-    """
-
-    __tablename__ = "element_index"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_project_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_model_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_version_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_object_id: Mapped[str] = mapped_column(String, index=True)
-    application_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
-    category: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
-    level_name: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
-    family: Mapped[str | None] = mapped_column(String, nullable=True)
-    type_name: Mapped[str | None] = mapped_column(String, nullable=True)
-    speckle_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    name: Mapped[str | None] = mapped_column(String, nullable=True)
+_engine = None
+_SessionLocal: sessionmaker | None = None
 
 
-class ScheduleElementLink(Base):
-    """Resolved (schedule row → speckle element) pairs."""
-
-    __tablename__ = "schedule_element_links"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    schedule_id: Mapped[str] = mapped_column(
-        String, ForeignKey("schedule_uploads.id"), index=True
-    )
-    task_id: Mapped[str] = mapped_column(String, index=True)
-    speckle_object_id: Mapped[str] = mapped_column(String, index=True)
-    application_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    source: Mapped[str] = mapped_column(String)  # 'deterministic' | 'ai'
-    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-
-class Animation(Base):
-    __tablename__ = "animations"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    schedule_id: Mapped[str] = mapped_column(
-        String, ForeignKey("schedule_uploads.id"), index=True
-    )
-    script: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+def get_engine():
+    global _engine, _SessionLocal
+    if _engine is None:
+        settings = get_settings()
+        settings.ensure_dirs()
+        _engine = create_engine(
+            settings.database_url,
+            connect_args={"check_same_thread": False}
+            if settings.database_url.startswith("sqlite")
+            else {},
+            future=True,
+        )
+        _SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
+    return _engine
 
 
-engine = create_async_engine(settings.database_url, future=True)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+def init_db() -> None:
+    Base.metadata.create_all(bind=get_engine())
 
 
-async def init_db() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+def get_sessionmaker() -> sessionmaker:
+    get_engine()
+    assert _SessionLocal is not None
+    return _SessionLocal
 
 
-async def get_session() -> AsyncSession:  # type: ignore[misc]
-    async with SessionLocal() as session:
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    factory = get_sessionmaker()
+    session = factory()
+    try:
         yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def reset_engine() -> None:
+    """Used by tests to rebind after changing IFCSCHED_DATABASE_URL."""
+    global _engine, _SessionLocal
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _SessionLocal = None
+
+
+# --------------------------------------------------------------------------
+# element frame storage
+# --------------------------------------------------------------------------
+
+
+def elements_path(project_id: int) -> Path:
+    settings = get_settings()
+    directory = settings.project_dir / str(project_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "elements.json.gz"
+
+
+def save_elements(project_id: int, frame: pd.DataFrame) -> Path:
+    path = elements_path(project_id)
+    payload = frame.to_dict(orient="records")
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump(payload, handle, default=_json_default)
+    return path
+
+
+def load_elements(project_id: int) -> pd.DataFrame:
+    path = elements_path(project_id)
+    if not path.exists():
+        return pd.DataFrame()
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return normalize_frame(pd.DataFrame(payload))
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    if hasattr(value, "item"):  # numpy scalars
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+    return str(value)

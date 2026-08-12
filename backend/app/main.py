@@ -1,41 +1,73 @@
+"""FastAPI application entry point."""
+
+from __future__ import annotations
+
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from .auth.speckle_oauth import router as speckle_oauth_router
-from .config import settings
+from .config import get_settings
 from .db import init_db
-from .routes.jobs import router as jobs_router
-from .routes.me import router as me_router
-from .routes.schedules import router as schedules_router
-from .routes.speckle import router as speckle_router
+from .jobs import get_job_manager
+from .routes import ROUTERS
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+)
+log = logging.getLogger("ifcsched")
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    await init_db()
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    settings.ensure_dirs()
+    init_db()
+    log.info("data dir: %s", settings.data_dir)
+    log.info("config dir: %s", settings.config_dir)
+    log.info("LLM layer: %s", "enabled" if settings.llm_enabled else "disabled")
     yield
+    get_job_manager().shutdown()
 
 
-app = FastAPI(title="BIM AI Backend — Speckle M1", lifespan=lifespan)
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(
+        title="IFC → Construction Schedule Generator",
+        version="0.1.0",
+        description=(
+            "Upload an IFC model, profile it, pick a schedule level of detail, "
+            "and generate a CPM-calculated construction programme."
+        ),
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.app_base_url],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    for router in ROUTERS:
+        app.include_router(router)
+
+    @app.get("/api/health")
+    def health() -> dict:
+        return {"status": "ok", "llm_enabled": settings.llm_enabled}
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        log.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal error", "error": str(exc)[:400]},
+        )
+
+    return app
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
-
-
-app.include_router(speckle_oauth_router)
-app.include_router(me_router)
-app.include_router(speckle_router)
-app.include_router(schedules_router)
-app.include_router(jobs_router)
+app = create_app()
