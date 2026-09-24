@@ -17,12 +17,14 @@ export interface Project {
   status: ProjectStatus;
   error: string | null;
   has_schedule: boolean;
+  data_date: string | null;
+  geometry_status: "building" | "ready" | "failed" | null;
 }
 
 export interface Job {
   id: string;
   project_id: number;
-  kind: "parse" | "schedule";
+  kind: "parse" | "schedule" | "geometry";
   status: "queued" | "running" | "done" | "failed";
   progress: number;
   message: string;
@@ -229,4 +231,121 @@ export interface ScheduleRequest {
   holidays?: string[];
   crew_overrides?: Record<string, number>;
   llm_enabled?: boolean;
+}
+
+// --- progress ---------------------------------------------------------------
+
+export type ProgressStatus = "not_started" | "in_progress" | "complete";
+export type ScheduleFlag = "complete" | "ahead" | "on_track" | "behind" | "not_started";
+export type DelayCause = "late_start" | "slow_progress" | "predecessor_delay";
+
+/** A task with its progress state, forecast and baseline variance merged in. */
+export interface ProgressTask extends Task {
+  status: ProgressStatus;
+  percent_complete: number;
+  quantity_placed: number | null;
+  actual_start: string | null;
+  actual_finish: string | null;
+  remaining_duration: number;
+  progress_note: string | null;
+  progress_reported_on: string | null;
+  progress_assumptions: string[];
+  forecast_start: string;
+  forecast_finish: string;
+  forecast_total_float: number;
+  forecast_critical: boolean;
+  baseline_start: string | null;
+  baseline_finish: string | null;
+  baseline_duration: number;
+  in_baseline: boolean;
+  planned_percent: number;
+  percent_variance: number;
+  start_variance_days: number | null;
+  finish_variance_days: number | null;
+  schedule_flag: ScheduleFlag;
+  delay_cause: DelayCause | null;
+}
+
+export interface ProgressSummary {
+  data_date: string;
+  variance_basis: "baseline" | "plan";
+  baseline_task_count: number;
+  task_count: number;
+  planned_percent_complete: number;
+  actual_percent_complete: number;
+  schedule_performance_index: number | null;
+  reference_finish: string | null;
+  forecast_finish: string | null;
+  finish_variance_days: number | null;
+  by_status: Partial<Record<ProgressStatus, number>>;
+  by_flag: Partial<Record<ScheduleFlag, number>>;
+  by_delay_cause: Partial<Record<DelayCause, number>>;
+  quantity_by_unit: Record<string, { placed: number; total: number; percent: number }>;
+  critical_behind: {
+    id: string;
+    label: string;
+    finish_variance_days: number;
+    forecast_finish: string;
+    delay_cause: DelayCause | null;
+  }[];
+  forecast_critical_path: string[];
+}
+
+export interface Baseline {
+  id: number;
+  project_id: number;
+  name: string;
+  created_at: string | null;
+  is_current: boolean;
+  finish_date: string | null;
+  task_count: number;
+}
+
+export interface ProgressView {
+  tasks: ProgressTask[];
+  summary: ProgressSummary;
+  warnings: string[];
+  baseline: Baseline | null;
+  data_date_is_default: boolean;
+}
+
+export interface ProgressEntryInput {
+  task_id: string;
+  percent_complete?: number | null;
+  quantity_placed?: number | null;
+  actual_start?: string | null;
+  actual_finish?: string | null;
+  note?: string | null;
+}
+
+// --- geometry -----------------------------------------------------------------
+
+export interface GeometryElement {
+  global_id: string;
+  ifc_class: string | null;
+  name: string | null;
+  parent_id: string | null;
+  vertex_start: number;
+  vertex_count: number;
+  index_start: number;
+  index_count: number;
+  bbox: { min: [number, number, number]; max: [number, number, number] };
+}
+
+export interface GeometryManifest {
+  version: number;
+  build_id: string;
+  up_axis: "y";
+  units: "m";
+  origin_offset: [number, number, number];
+  bounds: { min: [number, number, number]; max: [number, number, number] };
+  element_count: number;
+  vertex_count: number;
+  triangle_count: number;
+  buffers: {
+    positions: { offset: number; length: number; type: "float32" };
+    indices: { offset: number; length: number; type: "uint32" };
+  };
+  elements: GeometryElement[];
+  warnings: string[];
 }

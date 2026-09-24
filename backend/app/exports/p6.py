@@ -136,31 +136,58 @@ def to_p6_xer(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes
     )
 
     task_ids = {task["id"]: 1000 + index for index, task in enumerate(tasks)}
+    progress = (schedule.get("progress") or {}).get("tasks") or {}
+    tracked = bool(progress)
+    status_codes = {
+        "not_started": "TK_NotStart",
+        "in_progress": "TK_Active",
+        "complete": "TK_Complete",
+    }
     task_rows: list[list[Any]] = []
     for index, task in enumerate(tasks):
         duration_hours = max(0, int(task.get("duration_days") or 0)) * 8
         path = tuple(task.get("wbs_path") or [])
-        task_rows.append([
+        state = progress.get(task["id"]) or {}
+        # When tracked, P6's target (planned) dates are the baseline and the
+        # remaining duration comes from progress; otherwise both are the plan.
+        target_start = state.get("baseline_start") or task.get("start_date")
+        target_finish = state.get("baseline_finish") or task.get("finish_date")
+        remaining_hours = (
+            max(0, int(state.get("remaining_duration") or 0)) * 8 if state else duration_hours
+        )
+        row = [
             task_ids[task["id"]], PROJ_ID, wbs_ids.get(path, WBS_ROOT_ID), CALENDAR_ID,
             (task.get("wbs_code") or str(index + 1))[:40], str(task.get("label") or "")[:200],
-            "TT_Task", "TK_NotStart", duration_hours, duration_hours, duration_hours,
-            _xer_date(task.get("start_date"), "08:00"), _xer_date(task.get("finish_date"), "16:00"),
+            "TT_Task", status_codes.get(state.get("status"), "TK_NotStart"),
+            duration_hours, remaining_hours, duration_hours,
+            _xer_date(target_start, "08:00"), _xer_date(target_finish, "16:00"),
             _xer_date(task.get("start_date"), "08:00"), _xer_date(task.get("finish_date"), "16:00"),
             _xer_date(task.get("late_start_date"), "08:00"),
             _xer_date(task.get("late_finish_date"), "16:00"),
             int(task.get("total_float") or 0) * 8, int(task.get("free_float") or 0) * 8,
             "N", "DT_FixedDrtn", index + 1,
-        ])
+        ]
+        if tracked:
+            row += [
+                "CP_Phys",
+                round(float(state.get("percent_complete") or 0), 2),
+                _xer_date(state["actual_start"], "08:00") if state.get("actual_start") else "",
+                _xer_date(state["actual_finish"], "16:00") if state.get("actual_finish") else "",
+            ]
+        task_rows.append(row)
 
-    writer.table(
-        "TASK",
-        ["task_id", "proj_id", "wbs_id", "clndr_id", "task_code", "task_name", "task_type",
-         "status_code", "target_drtn_hr_cnt", "remain_drtn_hr_cnt", "total_drtn_hr_cnt",
-         "target_start_date", "target_end_date", "early_start_date", "early_end_date",
-         "late_start_date", "late_end_date", "total_float_hr_cnt", "free_float_hr_cnt",
-         "cstr_type", "duration_type", "seq_num"],
-        task_rows,
-    )
+    task_fields = [
+        "task_id", "proj_id", "wbs_id", "clndr_id", "task_code", "task_name", "task_type",
+        "status_code", "target_drtn_hr_cnt", "remain_drtn_hr_cnt", "total_drtn_hr_cnt",
+        "target_start_date", "target_end_date", "early_start_date", "early_end_date",
+        "late_start_date", "late_end_date", "total_float_hr_cnt", "free_float_hr_cnt",
+        "cstr_type", "duration_type", "seq_num",
+    ]
+    if tracked:
+        task_fields += [
+            "complete_pct_type", "phys_complete_pct", "act_start_date", "act_end_date",
+        ]
+    writer.table("TASK", task_fields, task_rows)
 
     pred_rows: list[list[Any]] = []
     pred_id = 1

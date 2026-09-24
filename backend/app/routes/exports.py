@@ -7,8 +7,9 @@ import re
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from ..db import Project, ScheduleRecord, session_scope
+from ..db import BaselineRecord, ProgressUpdate, Project, ScheduleRecord, session_scope
 from ..exports import FORMATS
+from .progress import evaluate as evaluate_progress
 
 router = APIRouter(prefix="/api/projects", tags=["exports"])
 
@@ -33,6 +34,21 @@ def export_schedule(project_id: int, fmt: str) -> Response:
             )
         schedule = record.as_dict()
         project_name = project.name
+
+        # Progress rides along only once there is something to say, so an
+        # untracked schedule exports exactly as it always has.
+        tracked = (
+            session.query(ProgressUpdate).filter_by(project_id=project_id).first() is not None
+            or session.query(BaselineRecord).filter_by(project_id=project_id).first()
+            is not None
+        )
+        if tracked:
+            view = evaluate_progress(session, project_id)
+            schedule["progress"] = {
+                "tasks": {row["id"]: row for row in view["tasks"]},
+                "summary": view["summary"],
+                "baseline": view["baseline"],
+            }
 
     media_type, extension, writer = FORMATS[fmt]
     try:

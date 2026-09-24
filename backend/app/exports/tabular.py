@@ -42,23 +42,49 @@ def _predecessor_text(task: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _row(task: dict[str, Any]) -> list[Any]:
+# Appended when the schedule is being tracked against progress.
+PROGRESS_COLUMNS = [
+    ("status", "Status"),
+    ("percent_complete", "% Complete"),
+    ("quantity_placed", "Qty Placed"),
+    ("actual_start", "Actual Start"),
+    ("actual_finish", "Actual Finish"),
+    ("baseline_start", "Baseline Start"),
+    ("baseline_finish", "Baseline Finish"),
+    ("forecast_finish", "Forecast Finish"),
+    ("finish_variance_days", "Finish Variance (d)"),
+    ("schedule_flag", "Flag"),
+    ("delay_cause", "Delay Cause"),
+]
+
+
+def _progress_for(schedule: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    progress = schedule.get("progress")
+    return progress.get("tasks") if isinstance(progress, dict) else None
+
+
+def _row(task: dict[str, Any], progress: dict[str, dict[str, Any]] | None = None) -> list[Any]:
     row = [task.get(key) for key, _ in COLUMNS]
+    if progress is not None:
+        state = progress.get(task.get("id"), {})
+        row.extend(state.get(key) for key, _ in PROGRESS_COLUMNS)
     row.append(_predecessor_text(task))
     row.append(";".join(task.get("element_ids") or []))
     return row
 
 
-def _header() -> list[str]:
-    return [title for _, title in COLUMNS] + ["Predecessors", "Source GlobalIds"]
+def _header(tracked: bool = False) -> list[str]:
+    extra = [title for _, title in PROGRESS_COLUMNS] if tracked else []
+    return [title for _, title in COLUMNS] + extra + ["Predecessors", "Source GlobalIds"]
 
 
 def to_csv(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(_header())
+    progress = _progress_for(schedule)
+    writer.writerow(_header(progress is not None))
     for task in schedule.get("tasks") or []:
-        writer.writerow(_row(task))
+        writer.writerow(_row(task, progress))
     return buffer.getvalue().encode("utf-8-sig")
 
 
@@ -75,7 +101,9 @@ def to_xlsx(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes:
     header_fill = PatternFill("solid", fgColor="1F2937")
     critical_fill = PatternFill("solid", fgColor="FEE2E2")
 
-    header = _header()
+    progress = _progress_for(schedule)
+    behind_fill = PatternFill("solid", fgColor="FEF3C7")
+    header = _header(progress is not None)
     sheet.append(header)
     for column in range(1, len(header) + 1):
         cell = sheet.cell(row=1, column=column)
@@ -84,13 +112,21 @@ def to_xlsx(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes:
         cell.alignment = Alignment(vertical="center")
 
     for task in schedule.get("tasks") or []:
-        sheet.append(_row(task))
-        if task.get("is_critical"):
+        sheet.append(_row(task, progress))
+        behind = progress is not None and (
+            progress.get(task.get("id"), {}).get("schedule_flag") == "behind"
+        )
+        # Late beats critical: it is the more urgent of the two to act on.
+        fill = behind_fill if behind else critical_fill if task.get("is_critical") else None
+        if fill is not None:
             for column in range(1, len(header) + 1):
-                sheet.cell(row=sheet.max_row, column=column).fill = critical_fill
+                sheet.cell(row=sheet.max_row, column=column).fill = fill
 
     widths = [10, 18, 46, 16, 14, 12, 18, 18, 22, 22, 10, 12, 8, 16, 12, 8, 18, 12,
-              12, 12, 12, 12, 10, 30, 40]
+              12, 12, 12, 12, 10]
+    if progress is not None:
+        widths += [12, 11, 11, 13, 13, 14, 14, 15, 12, 11, 18]
+    widths += [30, 40]
     for index, width in enumerate(widths[: len(header)], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "A2"
@@ -103,6 +139,17 @@ def to_xlsx(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes:
         report_sheet.append([key, value])
     report_sheet.column_dimensions["A"].width = 46
     report_sheet.column_dimensions["B"].width = 60
+
+    summary = (schedule.get("progress") or {}).get("summary")
+    if summary:
+        progress_sheet = workbook.create_sheet("Progress", 1)
+        progress_sheet.append(["Metric", "Value"])
+        for column in (1, 2):
+            progress_sheet.cell(row=1, column=column).font = Font(bold=True)
+        for key, value in _flatten(summary):
+            progress_sheet.append([key, value])
+        progress_sheet.column_dimensions["A"].width = 46
+        progress_sheet.column_dimensions["B"].width = 60
 
     buffer = io.BytesIO()
     workbook.save(buffer)

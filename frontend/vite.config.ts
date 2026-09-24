@@ -7,6 +7,11 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
   },
+  build: {
+    // The one chunk over the default 500 kB is three.js, which is already
+    // split out and only loaded when the 4D tab opens.
+    chunkSizeWarningLimit: 600,
+  },
   server: {
     port: 5173,
     proxy: {

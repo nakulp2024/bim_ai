@@ -1,9 +1,13 @@
 import type {
+  Baseline,
   FilterReport,
+  GeometryManifest,
   Job,
   LevelPrediction,
   ModelProfile,
   ParseReport,
+  ProgressEntryInput,
+  ProgressView,
   Project,
   RatesResponse,
   Schedule,
@@ -154,6 +158,63 @@ export const api = {
     ),
 
   exportUrl: (id: number, fmt: string) => `${BASE}/api/projects/${id}/export/${fmt}`,
+
+  // --- progress --------------------------------------------------------------
+
+  getProgress: (id: number) => request<ProgressView>(`/api/projects/${id}/progress`),
+
+  reportProgress: (id: number, entries: ProgressEntryInput[], reportedOn?: string) =>
+    request<ProgressView>(`/api/projects/${id}/progress`, {
+      method: "POST",
+      body: JSON.stringify({ entries, reported_on: reportedOn ?? null }),
+    }),
+
+  clearProgress: (id: number, taskId: string) =>
+    request<ProgressView>(`/api/projects/${id}/progress/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    }),
+
+  setDataDate: (id: number, dataDate: string) =>
+    request<{ data_date: string }>(`/api/projects/${id}/data-date`, {
+      method: "PUT",
+      body: JSON.stringify({ data_date: dataDate }),
+    }),
+
+  listBaselines: (id: number) =>
+    request<{ baselines: Baseline[] }>(`/api/projects/${id}/baselines`),
+
+  createBaseline: (id: number, name?: string) =>
+    request<Baseline>(`/api/projects/${id}/baselines`, {
+      method: "POST",
+      body: JSON.stringify({ name: name ?? null }),
+    }),
+
+  activateBaseline: (id: number, baselineId: number) =>
+    request<Baseline>(`/api/projects/${id}/baselines/${baselineId}/activate`, {
+      method: "POST",
+    }),
+
+  // --- geometry --------------------------------------------------------------
+
+  buildGeometry: (id: number, force = false) =>
+    request<{ job_id: string | null; status: string }>(
+      `/api/projects/${id}/geometry${force ? "?force=true" : ""}`,
+      { method: "POST" },
+    ),
+
+  getGeometryManifest: (id: number) =>
+    request<GeometryManifest>(`/api/projects/${id}/geometry`),
+
+  /** Versioned by build id, so a rebuild never meets a stale cached buffer. */
+  getGeometryBuffer: async (id: number, buildId: string): Promise<ArrayBuffer> => {
+    const response = await fetch(
+      `${BASE}/api/projects/${id}/geometry/buffer?v=${encodeURIComponent(buildId)}`,
+    );
+    if (!response.ok) {
+      throw new ApiError(`Could not load model geometry (${response.status})`, response.status);
+    }
+    return response.arrayBuffer();
+  },
 };
 
 /** Poll a background job until it finishes, reporting progress as it goes. */

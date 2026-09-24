@@ -77,9 +77,11 @@ def to_msproject_xml(schedule: dict[str, Any], project_name: str = "Schedule") -
 
     # --- tasks ------------------------------------------------------------
     uid_by_id = {task["id"]: index + 1 for index, task in enumerate(tasks)}
+    progress = (schedule.get("progress") or {}).get("tasks") or {}
     tasks_node = ET.SubElement(root, f"{{{MSPDI_NS}}}Tasks")
     for index, task in enumerate(tasks):
         uid = uid_by_id[task["id"]]
+        state = progress.get(task["id"])
         node = ET.SubElement(tasks_node, f"{{{MSPDI_NS}}}Task")
         _text(node, f"{{{MSPDI_NS}}}UID", uid)
         _text(node, f"{{{MSPDI_NS}}}ID", index + 1)
@@ -105,6 +107,19 @@ def to_msproject_xml(schedule: dict[str, Any], project_name: str = "Schedule") -
         _text(node, f"{{{MSPDI_NS}}}LateFinish", _stamp(task.get("late_finish_date"), 16))
         _text(node, f"{{{MSPDI_NS}}}TotalSlack", int(task.get("total_float") or 0) * 4800)
         _text(node, f"{{{MSPDI_NS}}}FreeSlack", int(task.get("free_float") or 0) * 4800)
+        if state:
+            # Updates out: Project reads these as the task's reported progress.
+            if state.get("actual_start"):
+                _text(node, f"{{{MSPDI_NS}}}ActualStart", _stamp(state["actual_start"], 8))
+            if state.get("actual_finish"):
+                _text(node, f"{{{MSPDI_NS}}}ActualFinish", _stamp(state["actual_finish"], 16))
+            _text(
+                node,
+                f"{{{MSPDI_NS}}}PercentComplete",
+                int(round(float(state.get("percent_complete") or 0))),
+            )
+            remaining = max(0, int(state.get("remaining_duration") or 0))
+            _text(node, f"{{{MSPDI_NS}}}RemainingDuration", f"PT{remaining * 8}H0M0S")
         _text(node, f"{{{MSPDI_NS}}}CalendarUID", "1")
         # Source traceability travels in the notes field so it survives a
         # round trip through Project.
@@ -126,6 +141,15 @@ def to_msproject_xml(schedule: dict[str, Any], project_name: str = "Schedule") -
             )
             _text(link_node, f"{{{MSPDI_NS}}}LinkLag", int(link.get("lag") or 0) * 4800)
             _text(link_node, f"{{{MSPDI_NS}}}LagFormat", "7")
+
+        if state and state.get("in_baseline") and state.get("baseline_start"):
+            baseline = ET.SubElement(node, f"{{{MSPDI_NS}}}Baseline")
+            _text(baseline, f"{{{MSPDI_NS}}}Number", "0")
+            _text(baseline, f"{{{MSPDI_NS}}}Start", _stamp(state["baseline_start"], 8))
+            _text(baseline, f"{{{MSPDI_NS}}}Finish", _stamp(state["baseline_finish"], 16))
+            baseline_days = max(0, int(state.get("baseline_duration") or 0))
+            _text(baseline, f"{{{MSPDI_NS}}}Duration", f"PT{baseline_days * 8}H0M0S")
+            _text(baseline, f"{{{MSPDI_NS}}}DurationFormat", "7")
 
     tree_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     return tree_bytes

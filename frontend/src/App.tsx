@@ -1,8 +1,9 @@
 import { AlertCircle, ArrowLeft, Building2, Loader2, RefreshCw } from "lucide-react";
-import { useCallback, useState } from "react";
+import { Suspense, lazy, useCallback, useState } from "react";
 
 import { ExportBar } from "@/components/ExportBar";
 import { GanttChart } from "@/components/GanttChart";
+import { ProgressPanel } from "@/components/ProgressPanel";
 import { RatesEditor } from "@/components/RatesEditor";
 import { RelinkDialog } from "@/components/RelinkDialog";
 import { RunReport } from "@/components/RunReport";
@@ -20,11 +21,18 @@ import type {
   LinkType,
   ModelProfile,
   ParseReport,
+  ProgressEntryInput,
+  ProgressView,
   Project,
   Schedule,
   ScheduleRequest,
 } from "@/lib/types";
 import { cn, formatNumber } from "@/lib/utils";
+
+// three.js is most of the bundle and only the 4D tab needs it.
+const FourDPlayer = lazy(() =>
+  import("@/components/FourDPlayer").then((module) => ({ default: module.FourDPlayer })),
+);
 
 type Stage = "upload" | "configure" | "schedule";
 
@@ -40,6 +48,7 @@ export default function App() {
   const [profile, setProfile] = useState<ModelProfile | null>(null);
   const [parseReport, setParseReport] = useState<ParseReport | null>(null);
   const [schedule, setSchedule] = useState<Schedule | null>(null);
+  const [progressView, setProgressView] = useState<ProgressView | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -88,6 +97,7 @@ export default function App() {
       }
       const payload = await api.getSchedule(project.id);
       setSchedule(payload);
+      await loadProgress(project.id);
       setStage("schedule");
       setBusy(false);
     } catch (cause) {
@@ -95,11 +105,42 @@ export default function App() {
     }
   }
 
+  /** The forecast is derived from the plan, so any change to the plan
+   * invalidates it. Failure here is not fatal: the plan is still usable. */
+  async function loadProgress(projectId: number) {
+    try {
+      setProgressView(await api.getProgress(projectId));
+    } catch {
+      setProgressView(null);
+    }
+  }
+
   async function mutate(action: () => Promise<Schedule>) {
+    if (!project) return;
     setBusy(true);
     setError(null);
     try {
       setSchedule(await action());
+      await loadProgress(project.id);
+    } catch (cause) {
+      fail(cause);
+      return;
+    }
+    setBusy(false);
+  }
+
+  async function mutateProgress(action: () => Promise<ProgressView | unknown>) {
+    if (!project) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await action();
+      // Some calls return the recalculated view directly; the rest need a reload.
+      if (result && typeof result === "object" && "summary" in result) {
+        setProgressView(result as ProgressView);
+      } else {
+        await loadProgress(project.id);
+      }
     } catch (cause) {
       fail(cause);
       return;
@@ -112,6 +153,7 @@ export default function App() {
     setBusy(true);
     try {
       setSchedule(await api.getSchedule(project.id));
+      await loadProgress(project.id);
     } catch (cause) {
       fail(cause);
       return;
@@ -125,6 +167,7 @@ export default function App() {
     setProfile(null);
     setParseReport(null);
     setSchedule(null);
+    setProgressView(null);
     setSelectedId(null);
     setError(null);
   }
@@ -244,6 +287,8 @@ export default function App() {
             <Tabs defaultValue="gantt">
               <TabsList>
                 <TabsTrigger value="gantt">Gantt</TabsTrigger>
+                <TabsTrigger value="4d">4D</TabsTrigger>
+                <TabsTrigger value="progress">Progress</TabsTrigger>
                 <TabsTrigger value="table">Task table</TabsTrigger>
                 <TabsTrigger value="rates">Rates</TabsTrigger>
                 <TabsTrigger value="report">Run report</TabsTrigger>
@@ -274,6 +319,47 @@ export default function App() {
                         ` … +${selectedTask.element_ids.length - 12} more GlobalIds`}
                     </p>
                   </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="4d">
+                <Suspense
+                  fallback={
+                    <div className="flex h-[560px] items-center justify-center gap-2 rounded-lg border text-sm text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading 3D viewer…
+                    </div>
+                  }
+                >
+                  <FourDPlayer
+                    projectId={project.id}
+                    schedule={schedule}
+                    progress={progressView}
+                    selectedTaskId={selectedId}
+                    onSelectTask={setSelectedId}
+                  />
+                </Suspense>
+              </TabsContent>
+
+              <TabsContent value="progress">
+                {progressView ? (
+                  <ProgressPanel
+                    view={progressView}
+                    busy={busy}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                    onReport={(entries: ProgressEntryInput[], reportedOn?: string) =>
+                      mutateProgress(() => api.reportProgress(project.id, entries, reportedOn))
+                    }
+                    onClear={(taskId) =>
+                      mutateProgress(() => api.clearProgress(project.id, taskId))
+                    }
+                    onDataDate={(date) => mutateProgress(() => api.setDataDate(project.id, date))}
+                    onBaseline={() => mutateProgress(() => api.createBaseline(project.id))}
+                  />
+                ) : (
+                  <p className="p-8 text-center text-sm text-muted-foreground">
+                    Progress could not be loaded for this schedule.
+                  </p>
                 )}
               </TabsContent>
 

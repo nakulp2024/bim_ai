@@ -292,3 +292,118 @@ def test_old_databases_gain_new_columns(tmp_path, monkeypatch):
     finally:
         db_module.reset_engine()
         config_module.get_settings.cache_clear()
+
+
+# --- exports ------------------------------------------------------------------
+
+
+@pytest.fixture
+def tracked(api_client, baselined, ordered_tasks):
+    """A schedule with one finished task and one half-done task.
+
+    The half-done one must last several days: in-progress work always keeps at
+    least a day remaining, so on a one-day task "remaining" equals "planned".
+    """
+    first = ordered_tasks[0]
+    second = next(
+        t for t in ordered_tasks if t["id"] != first["id"] and t["duration_days"] >= 4
+    )
+    report(
+        api_client,
+        baselined,
+        [
+            {"task_id": first["id"], "actual_start": "2026-09-01", "actual_finish": "2026-09-07"},
+            {"task_id": second["id"], "percent_complete": 50, "actual_start": "2026-09-02"},
+        ],
+    )
+    return baselined, first, second
+
+
+def test_untracked_exports_carry_no_progress(api_client, scheduled):
+    import csv
+    import io
+    import json
+
+    text = api_client.get(f"/api/projects/{scheduled}/export/csv").content.decode("utf-8-sig")
+    assert "% Complete" not in next(csv.reader(io.StringIO(text)))
+    package = json.loads(api_client.get(f"/api/projects/{scheduled}/export/json").content)
+    assert package["progress"] is None
+    assert all(task["progress"] is None for task in package["tasks"])
+    xer = api_client.get(f"/api/projects/{scheduled}/export/xer").text
+    assert "phys_complete_pct" not in xer
+
+
+def test_csv_and_xlsx_carry_progress(api_client, tracked):
+    import csv
+    import io
+
+    from openpyxl import load_workbook
+
+    project, first, second = tracked
+    text = api_client.get(f"/api/projects/{project}/export/csv").content.decode("utf-8-sig")
+    rows = {row["Task ID"]: row for row in csv.DictReader(io.StringIO(text))}
+    assert rows[first["id"]]["Status"] == "complete"
+    assert rows[first["id"]]["Actual Finish"] == "2026-09-07"
+    assert rows[second["id"]]["% Complete"] == "50.0"
+    assert rows[first["id"]]["Baseline Finish"] == first["finish_date"]
+    # GlobalIds are still the last column, whatever else was added.
+    assert list(rows[first["id"]])[-1] == "Source GlobalIds"
+
+    xlsx = api_client.get(f"/api/projects/{project}/export/xlsx").content
+    workbook = load_workbook(io.BytesIO(xlsx))
+    assert workbook.sheetnames == ["Schedule", "Progress", "Run report"]
+    metrics = {row[0]: row[1] for row in workbook["Progress"].iter_rows(values_only=True)}
+    assert metrics["variance_basis"] == "baseline"
+
+
+def test_ms_project_carries_actuals_and_baseline(api_client, tracked):
+    from xml.etree import ElementTree as ET
+
+    from app.exports.msproject import MSPDI_NS
+
+    project, first, second = tracked
+    root = ET.fromstring(api_client.get(f"/api/projects/{project}/export/mspdi").content)
+    tasks = {
+        node.findtext(f"{{{MSPDI_NS}}}Name"): node
+        for node in root.findall(f".//{{{MSPDI_NS}}}Task")
+    }
+    done = tasks[first["label"]]
+    assert done.findtext(f"{{{MSPDI_NS}}}PercentComplete") == "100"
+    assert done.findtext(f"{{{MSPDI_NS}}}ActualFinish").startswith("2026-09-07")
+    baseline = done.find(f"{{{MSPDI_NS}}}Baseline")
+    assert baseline is not None
+    assert baseline.findtext(f"{{{MSPDI_NS}}}Finish").startswith(first["finish_date"])
+    assert tasks[second["label"]].findtext(f"{{{MSPDI_NS}}}PercentComplete") == "50"
+
+
+def test_p6_carries_status_and_actuals(api_client, tracked):
+    project, first, second = tracked
+    lines = api_client.get(f"/api/projects/{project}/export/xer").text.splitlines()
+    start = lines.index("%T\tTASK")
+    fields = lines[start + 1].split("\t")[1:]
+    rows = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("%R"):
+            break
+        rows.append(dict(zip(fields, line.split("\t")[1:], strict=True)))
+    by_name = {row["task_name"]: row for row in rows}
+    assert by_name[first["label"]]["status_code"] == "TK_Complete"
+    assert by_name[first["label"]]["act_end_date"].startswith("2026-09-07")
+    assert by_name[second["label"]]["status_code"] == "TK_Active"
+    assert float(by_name[second["label"]]["phys_complete_pct"]) == 50.0
+    assert by_name[second["label"]]["remain_drtn_hr_cnt"] != by_name[second["label"]][
+        "target_drtn_hr_cnt"
+    ]
+
+
+def test_json_carries_progress_for_4d_replay(api_client, tracked):
+    import json
+
+    project, first, _ = tracked
+    package = json.loads(api_client.get(f"/api/projects/{project}/export/json").content)
+    task = next(t for t in package["tasks"] if t["id"] == first["id"])
+    assert task["progress"]["status"] == "complete"
+    assert task["progress"]["actual_finish"] == "2026-09-07"
+    assert task["source_global_ids"]
+    assert package["progress"]["summary"]["variance_basis"] == "baseline"
+    assert package["progress"]["baseline"]["name"] == "Contract"

@@ -9,8 +9,38 @@ from typing import Any
 SCHEMA_VERSION = "ifc-schedule/1.0"
 
 
+PROGRESS_FIELDS = (
+    "status",
+    "percent_complete",
+    "quantity_placed",
+    "actual_start",
+    "actual_finish",
+    "remaining_duration",
+    "forecast_start",
+    "forecast_finish",
+    "forecast_critical",
+    "baseline_start",
+    "baseline_finish",
+    "planned_percent",
+    "start_variance_days",
+    "finish_variance_days",
+    "schedule_flag",
+    "delay_cause",
+    "progress_assumptions",
+)
+
+
+def _progress_block(progress: dict[str, Any], task_id: str) -> dict[str, Any] | None:
+    state = progress.get(task_id)
+    if not state:
+        return None
+    return {field: state.get(field) for field in PROGRESS_FIELDS}
+
+
 def to_json_package(schedule: dict[str, Any], project_name: str = "Schedule") -> bytes:
     tasks = schedule.get("tasks") or []
+    tracking = schedule.get("progress") or {}
+    progress = tracking.get("tasks") or {}
     package = {
         "schema": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -66,9 +96,18 @@ def to_json_package(schedule: dict[str, Any], project_name: str = "Schedule") ->
                 # The whole point of the export: 4D linking needs these.
                 "source_global_ids": task.get("element_ids") or [],
                 "user_edited": task.get("user_edited", False),
+                # Present only when the schedule is tracked; 4D consumers use
+                # this to replay what actually happened, not just the plan.
+                "progress": _progress_block(progress, task.get("id")),
             }
             for task in tasks
         ],
+        "progress": {
+            "summary": tracking.get("summary"),
+            "baseline": tracking.get("baseline"),
+        }
+        if tracking
+        else None,
         "links": schedule.get("links") or [],
         "report": schedule.get("report") or {},
     }
