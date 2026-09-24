@@ -2,10 +2,11 @@
 
 Upload an IFC model, profile what is actually in it, choose a **schedule level of detail**, and
 get a CPM-calculated construction programme you can edit and export to CSV, Excel, MS Project,
-Primavera P6 or JSON.
+Primavera P6 or JSON. Then track it: baseline the plan, report progress from site, see the
+forecast finish move, and play the whole sequence back on the model in 4D.
 
-Every task keeps the list of source `GlobalId`s it was built from, so the output can drive 4D
-linking later.
+Every task keeps the list of source `GlobalId`s it was built from, which is what ties the
+schedule, the progress and the 3D model together.
 
 ```
 IFC file
@@ -16,6 +17,9 @@ IFC file
    ↓  sequence       trade order, vertical logic, zone repetition (config/sequencing.yaml)
    ↓  calculate      forward/backward CPM pass → dates, float, critical path
    ↓  export         CSV · XLSX · MS Project XML · P6 XER · JSON
+   ↓  baseline       freeze the plan as the yardstick
+   ↓  track          progress from site → forecast CPM → variance and why
+   ↓  4D             play planned, actual or variance back on the model
 ```
 
 ---
@@ -50,7 +54,7 @@ there is nothing else to configure. Point it somewhere else with
 ### Tests
 
 ```bash
-cd backend && pytest          # 203 tests
+cd backend && pytest          # 277 tests
 cd frontend && npm run lint   # tsc --noEmit
 ```
 
@@ -214,6 +218,119 @@ export). It answers: what was read, what was thrown away and why, what was built
 | **Primavera P6 XER** | `PROJECT`, `CALENDAR`, `PROJWBS`, `TASK`, `TASKPRED` tables, plus an `IFCSOURCE` table carrying the GlobalIds |
 | **JSON** | Lossless: tasks, logic, quantities, confidence, float, and `source_global_ids` for 4D linking |
 
+Once a schedule is tracked (it has a baseline or any progress), every format also carries
+progress in its own native form — "baseline in, updates out":
+
+| Format | Progress |
+|--------|----------|
+| **CSV / XLSX** | Status, % complete, quantity placed, actual and baseline dates, forecast finish, slip, flag, delay cause. XLSX adds a Progress sheet and highlights late rows |
+| **MS Project XML** | `ActualStart`, `ActualFinish`, `PercentComplete`, `RemainingDuration`, and the baseline as Baseline 0 |
+| **Primavera P6 XER** | Status (`TK_NotStart` / `TK_Active` / `TK_Complete`), physical % complete, actual dates, remaining duration, with the baseline as the target dates |
+| **JSON** | A `progress` block per task, plus the project summary, for replaying what actually happened |
+
+An untracked schedule exports exactly as it did before tracking existed.
+
+---
+
+## Progress tracking
+
+The plan says what should happen; progress says what did. Three things drive it:
+
+- **Baseline** — a frozen copy of the plan, so later edits to the plan do not move the yardstick.
+  Several can exist per project; exactly one is current. Without one, variance is measured
+  against the live plan and the UI says so.
+- **Data date** — the date progress is reported as of. Following P6's convention, it is the
+  first day of *remaining* work.
+- **Progress reports** — percent complete, quantity placed, actual start and finish, per task.
+
+### Reports merge; they never overwrite
+
+Field reporting is partial. Someone reports "started on the 2nd"; a week later, "68 m³ placed".
+The second report must not erase the first. Reports are append-only, and a task's current state
+is the fold of its reports in date order: each later non-blank value overrides an earlier one, a
+blank never erases one. The full history is kept at `/progress/history`.
+
+When data is missing, the gap is filled by a stated rule — quantity derives percent or the
+reverse, a completed task without an actual finish is assumed to have finished the working day
+before the data date, and so on — and every assumption is recorded on the task rather than
+applied silently. If a reported percent and a quantity-derived one disagree by more than 15
+points, the reported percent is kept (it can account for work a quantity misses, like formwork
+before a pour) and the disagreement is flagged.
+
+### The forecast
+
+A second CPM pass that honours what actually happened:
+
+| State | How it is scheduled |
+|-------|---------------------|
+| Complete | Pinned at its actual dates. No float, and never on the critical path — finished work cannot drive the finish date |
+| In progress | Pinned at its actual start; finishes after its remaining duration, counted from the data date |
+| Not started | Cannot start before the data date, whatever its logic says |
+
+Remaining duration is `ceil(duration × (1 − percent))`, but never less than one day while a task
+is still in progress, however high its percent.
+
+### Variance, and why
+
+Every task gets its start and finish slip against the baseline in working days, planned versus
+actual percent, and a flag: `complete`, `ahead`, `on_track`, `behind` or `not_started`.
+
+"Behind" alone does not tell a planner what to do, so behind tasks also carry a **delay cause**:
+
+| Cause | Meaning |
+|-------|---------|
+| `late_start` | It should have started by the data date and has not |
+| `slow_progress` | It started, but is less complete than the plan says it should be by now |
+| `predecessor_delay` | It is not due yet; it is only late because something before it slipped |
+
+The project summary rolls this up: duration-weighted planned and actual percent complete, a
+schedule performance index (actual ÷ planned; below 1 means behind), forecast versus reference
+finish, quantity placed per unit, and the critical tasks that are behind — the ones actually
+driving the finish date.
+
+---
+
+## 4D
+
+The **4D** tab plays the schedule back on the model: work not yet started is ghosted, work in
+progress is amber (red if it is critical), and built work takes its work package's colour.
+
+| View | Driven by |
+|------|-----------|
+| **Planned** | The current plan's dates |
+| **Actual** | What happened up to the data date, then the forecast |
+| **Variance** | Actual and forecast timing, coloured by how far each task is off the baseline |
+
+It opens on the plan until someone has reported progress: before that, "actual" is just the plan
+pushed to today, which would hide the real start. Hover an element to see its task; click one
+to select that task everywhere.
+
+**Geometry** is built on demand the first time the tab opens, as a background job, and cached
+per project. ifcopenshell tessellates every renderable product into two merged buffers —
+positions and triangle indices — plus a manifest recording which slice belongs to which
+GlobalId. The browser draws the whole model from those shared buffers and recolours an element
+by writing into its slice, which is what keeps playback cheap.
+
+A few things worth knowing:
+
+- **Axes and origin are converted server-side.** IFC is Z-up and three.js is Y-up. And real
+  models are often georeferenced far from the origin, where float32 cannot hold millimetres and
+  vertices visibly jitter, so the model is re-centred on its footprint and the offset recorded.
+- **Spaces, openings, annotation, grids, virtual elements and site terrain are not rendered.**
+  They have geometry but they are not work.
+- **Assembly parts resolve through their parent.** They are collapsed into the assembly before
+  scheduling, so they appear in no task themselves; without this they would render as
+  unscheduled context. Anything else unresolved — noise the filter removed — renders as neutral
+  context.
+- **Solid and ghosted work are drawn as two meshes over the same buffers.** A single mesh with
+  per-vertex transparency cannot ghost future work correctly: with depth writes on, a
+  translucent wall drawn first hides the built columns behind it.
+- **There is a triangle budget** (3 million by default). Anything over it is skipped and the
+  viewer says so rather than silently dropping it.
+- **Normals are computed in the browser**, not shipped: a third less to download.
+
+three.js is only loaded when the 4D tab is opened, so it costs nothing on the rest of the app.
+
 ---
 
 ## Optional LLM layer
@@ -270,6 +387,16 @@ links you or the rules put there. Anything the layer changes is recorded under t
 | `GET`/`PUT` | `/api/projects/{id}/rates` | Read or override the rate library |
 | `GET` | `/api/projects/{id}/export/{fmt}` | `csv` · `xlsx` · `mspdi` · `xer` · `json` |
 | `GET` | `/api/projects/{id}/run-report` | The per-run report on its own |
+| `GET`/`POST` | `/api/projects/{id}/baselines` | List baselines, or freeze the current plan as a new one |
+| `POST` | `/api/projects/{id}/baselines/{bid}/activate` | Make an earlier baseline current |
+| `PUT` | `/api/projects/{id}/data-date` | Set the date progress is reported as of |
+| `GET` | `/api/projects/{id}/progress` | Every task's state, forecast and variance, plus the summary |
+| `POST` | `/api/projects/{id}/progress` | Record a batch of task updates; returns the recalculated view |
+| `GET` | `/api/projects/{id}/progress/history` | The report log, optionally for one task |
+| `DELETE` | `/api/projects/{id}/progress/{task_id}` | Clear every report for one task |
+| `POST` | `/api/projects/{id}/geometry` | Build the 4D geometry in the background (cached; `?force=true` rebuilds) |
+| `GET` | `/api/projects/{id}/geometry` | The geometry manifest |
+| `GET` | `/api/projects/{id}/geometry/buffer` | The packed vertex and index buffer |
 | `GET` | `/api/config` | The merged, active configuration |
 
 Long parses run as background jobs on a thread pool, with progress written to the database on
@@ -283,22 +410,28 @@ duration, link, calendar, rate — re-runs CPM and returns the whole recalculate
 ```
 backend/
   app/
-    ifc/          parser.py (IFC → records), model.py (record shape), profile.py
-    schedule/     filtering · lod · durations · sequencing · cpm · calendar · pipeline
+    ifc/          parser (IFC → records) · model · profile · geometry (meshes for 4D)
+    schedule/     filtering · lod · durations · sequencing · cpm · calendar · pipeline · progress
     exports/      tabular (CSV/XLSX) · msproject · p6 · jsonpkg
     llm/          optional, lazily loaded, off by default
-    routes/       projects · schedule · rates · exports · jobs · config
+    routes/       projects · schedule · rates · progress · geometry · exports · jobs · config
     db.py         SQLAlchemy models; element frames are stored as gzipped JSON on disk
     jobs.py       thread-pool job manager with a pollable progress endpoint
   config/         filters · work_packages · rates · sequencing  (all user-overridable)
-  tests/          203 tests, plus the sample-IFC generator
+  tests/          277 tests, plus the sample-IFC generator
 frontend/
   src/
     steps/        UploadStep · ProfileStep · LodPicker
-    components/   GanttChart · TaskTable · RatesEditor · RunReport · RelinkDialog · ExportBar
+    components/   GanttChart · FourDPlayer · ProgressPanel · TaskTable · RatesEditor ·
+                  RunReport · RelinkDialog · ExportBar
     components/ui shadcn/ui-style primitives (vendored, built on Radix)
-    lib/          api client, shared types, helpers
+    lib/          api client, shared types, helpers,
+                  scene (three.js renderer) · fourd (element → task → colour at a date)
 ```
+
+Existing databases pick up new columns automatically on startup — `create_all()` never alters
+an existing table, so the app adds any missing nullable columns itself. Anything beyond an
+additive column would need a real migration.
 
 The UI components follow shadcn/ui conventions and are vendored into the repo rather than pulled
 in by the CLI, so `npm install` is all that is needed to build.
