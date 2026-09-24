@@ -154,13 +154,16 @@ class SampleModelBuilder:
         geometry: tuple[float, float, float] | None = None,
         properties: dict[str, dict[str, object]] | None = None,
         classification: tuple[str, str, str] | None = None,
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
+        """``geometry`` is a (dx, dy, dz) box; ``position`` is the centre of its
+        footprint and the z of its base, in world coordinates."""
         f = self.file
         kwargs: dict[str, object] = {
             "GlobalId": _guid(),
             "OwnerHistory": self.owner_history,
             "Name": name,
-            "ObjectPlacement": self._placement(0.0, 0.0, 0.0),
+            "ObjectPlacement": self._placement(*position),
         }
         if object_type:
             kwargs["ObjectType"] = object_type
@@ -626,7 +629,132 @@ def build_sample_model(schema: str = "IFC4") -> SampleModelBuilder:
         "IfcWall", "DUMMY placeholder wall", storey="L02", quantities={"NetArea": 5.0}
     )
 
+    apply_building_layout(builder)
     return builder
+
+
+# --------------------------------------------------------------------------
+# building layout
+# --------------------------------------------------------------------------
+
+# A 30 x 15 m two-storey frame (the footprint matches the 450 m2 slab
+# quantities above). Elements contained in a storey occupy the band *below*
+# that storey's level, so "L01 Columns" carry the L01 slab. That makes the
+# model build bottom-up in the same order the schedule does.
+FOOTPRINT_X = 30.0
+FOOTPRINT_Y = 15.0
+STOREY_HEIGHT = 3.5
+SLAB = 0.25
+BEAM = 0.6
+
+COLUMN_GRID = [(0.0, 0.0), (15.0, 0.0), (30.0, 0.0), (0.0, 15.0), (15.0, 15.0), (30.0, 15.0)]
+
+
+def _storey_band(name: str) -> tuple[float, float] | None:
+    """(base, top) of the band an element named for a storey occupies."""
+    for storey, top in (("L01", 3.5), ("L02", 7.0)):
+        if name.startswith(storey):
+            return top - STOREY_HEIGHT, top
+    return None
+
+
+def _index(name: str) -> int:
+    """Trailing digits of a mark like 'EW3' or 'C12', zero-based."""
+    digits = ""
+    for char in reversed(name.split()[-1]):
+        if not char.isdigit():
+            break
+        digits = char + digits
+    return int(digits) - 1 if digits else 0
+
+
+def _box_for(name: str) -> tuple[float, float, float, float, float, float] | None:
+    """(cx, cy, z0, dx, dy, dz) for a named element, or None for no geometry."""
+    ceiling_void = SLAB + BEAM
+    if name.startswith("Pad Footing"):
+        x, y = [(0.0, 0.0), (30.0, 0.0), (0.0, 15.0), (30.0, 15.0)][_index(name)]
+        return (x, y, -1.0, 1.8, 1.8, 0.8)
+    if name == "Ground Bearing Slab":
+        return (15.0, 7.5, -0.2, FOOTPRINT_X, FOOTPRINT_Y, 0.2)
+    if name == "L02 Column C7 (no Qto)":
+        # Keeps the 0.4 x 0.4 x 3.5 box the geometry-fallback test measures.
+        return (7.5, 7.5, 3.5, 0.4, 0.4, 3.5)
+    if name == "Orphan Balustrade":
+        return (15.0, 15.2, 7.0, 15.0, 0.05, 1.1)
+    if name == "Plant Skid PS-01":
+        return (22.0, 7.5, 7.0, 3.0, 2.0, 1.8)
+    if name.startswith("Tiny Bracket"):
+        return (20.0 + _index(name), 3.0, 7.0, 0.1, 0.1, 0.1)
+    if name.startswith("SF-01 Chord"):
+        return (5.0, 7.5 + 2.0 * _index(name), 7.0, 8.0, 0.2, 0.3)
+    if name == "SF-01 Gusset":
+        return (5.0, 8.5, 7.0, 0.5, 0.5, 0.02)
+    if name == "Office 01":
+        # A space: it has a volume, but must never be rendered as work.
+        return (7.5, 11.0, 0.0, 15.0, 8.0, 3.0)
+
+    band = _storey_band(name)
+    if band is None:
+        return None
+    base, top = band
+    height = STOREY_HEIGHT - SLAB
+
+    if " Column C" in name:
+        x, y = COLUMN_GRID[_index(name)]
+        return (x, y, base, 0.4, 0.4, height)
+    if name.endswith("Floor Slab"):
+        return (15.0, 7.5, top - SLAB, FOOTPRINT_X, FOOTPRINT_Y, SLAB)
+    if " Beam B" in name:
+        return [
+            (15.0, 0.0, top - ceiling_void, FOOTPRINT_X, 0.3, BEAM),
+            (15.0, 15.0, top - ceiling_void, FOOTPRINT_X, 0.3, BEAM),
+            (15.0, 7.5, top - ceiling_void, 0.3, FOOTPRINT_Y, BEAM),
+        ][_index(name)]
+    if "External Wall" in name:
+        return [
+            (15.0, -0.3, base, FOOTPRINT_X, 0.2, height),
+            (15.0, 15.3, base, FOOTPRINT_X, 0.2, height),
+            (-0.3, 7.5, base, 0.2, FOOTPRINT_Y, height),
+            (30.3, 7.5, base, 0.2, FOOTPRINT_Y, height),
+        ][_index(name)]
+    if " Partition P" in name:
+        i = _index(name)
+        if i < 4:
+            return ([5.0, 10.0, 20.0, 25.0][i], 11.0, base, 0.1, 8.0, height)
+        return (10.0, 7.0, base, 10.0, 0.1, height)
+    if " Window W" in name:
+        return ([5.0, 10.0, 20.0, 25.0][_index(name)], -0.3, base + 1.0, 1.6, 0.25, 1.5)
+    if " Door D" in name:
+        return ([7.0, 11.0, 14.0][_index(name)], 7.0, base, 0.9, 0.15, 2.1)
+    if "Supply Duct" in name:
+        return (15.0, [4.0, 7.5, 11.0][_index(name)], top - ceiling_void - 0.45, 24.0, 0.6, 0.4)
+    if "CHW Pipe" in name:
+        return (15.0, [2.0, 13.0][_index(name)], top - ceiling_void - 0.2, FOOTPRINT_X, 0.1, 0.1)
+    if name.endswith("Diffusers"):
+        return (15.0, 7.5, top - ceiling_void - 0.6, 0.6, 0.6, 0.1)
+    if name.endswith("Floor Finish"):
+        return (15.0, 7.5, base, FOOTPRINT_X, FOOTPRINT_Y, 0.02)
+    if name.endswith("Ceiling"):
+        return (15.0, 7.5, top - ceiling_void - 0.12, FOOTPRINT_X, FOOTPRINT_Y, 0.02)
+    return None
+
+
+def apply_building_layout(builder: SampleModelBuilder) -> int:
+    """Place and shape every element the layout knows about. Returns how many
+    were given geometry. Existing representations are moved, never replaced."""
+    placed = 0
+    for product in builder.file.by_type("IfcProduct"):
+        if product.is_a("IfcSpatialStructureElement") and not product.is_a("IfcSpace"):
+            continue
+        box = _box_for(product.Name or "")
+        if box is None:
+            continue
+        cx, cy, z0, dx, dy, dz = box
+        product.ObjectPlacement = builder._placement(cx, cy, z0)
+        if product.Representation is None:
+            builder.add_box_geometry(product, dx, dy, dz)
+        placed += 1
+    return placed
 
 
 def write_sample_ifc(path: str | Path, schema: str = "IFC4") -> Path:

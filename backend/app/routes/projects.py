@@ -114,6 +114,9 @@ async def upload_ifc(project_id: int, file: UploadFile = File(...)) -> dict:
         project.ifc_path = str(destination)
         project.status = "parsing"
         project.error = None
+        # A new model makes any tessellation of the old one wrong.
+        project.geometry_status = None
+    shutil.rmtree(settings.project_dir / str(project_id) / "geometry", ignore_errors=True)
 
     job_id = get_job_manager().submit("parse", project_id, _make_parse_worker(project_id))
     return {"job_id": job_id, "project_id": project_id, "filename": file.filename, "bytes": size}
