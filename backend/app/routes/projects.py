@@ -10,7 +10,14 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from sqlalchemy import select
 
 from ..config import get_settings, load_config
-from ..db import Project, load_elements, save_elements, session_scope
+from ..db import (
+    BaselineRecord,
+    ProgressUpdate,
+    Project,
+    load_elements,
+    save_elements,
+    session_scope,
+)
 from ..ifc.model import records_to_frame
 from ..ifc.parser import parse_ifc
 from ..ifc.profile import build_profile
@@ -56,6 +63,10 @@ def delete_project(project_id: int) -> dict:
         project = _require(session, project_id)
         if project.ifc_path:
             Path(project.ifc_path).unlink(missing_ok=True)
+        # SQLite only honours ON DELETE CASCADE with foreign keys switched on,
+        # so remove dependent rows explicitly rather than orphan them.
+        session.query(ProgressUpdate).filter_by(project_id=project_id).delete()
+        session.query(BaselineRecord).filter_by(project_id=project_id).delete()
         session.delete(project)
     shutil.rmtree(settings.project_dir / str(project_id), ignore_errors=True)
     return {"deleted": project_id}

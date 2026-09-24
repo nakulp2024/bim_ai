@@ -25,6 +25,13 @@ class CpmTask:
     duration: int
     predecessors: list[dict[str, Any]] = field(default_factory=list)
 
+    # Progress constraints. A forecast run needs to respect what already
+    # happened on site: work that has started cannot un-start, and work that
+    # has not started cannot start before the data date.
+    pinned_start: int | None = None      # exact ES, overrides predecessor logic
+    constraint_offset: int | None = None  # earliest ES, applied on top of logic
+    complete: bool = False                # finished work: no float, never critical
+
     early_start: int = 0
     early_finish: int = 0
     late_start: int = 0
@@ -137,6 +144,12 @@ def calculate(
                 candidate = source.early_start + lag - duration
             earliest = max(earliest, candidate)
         task.early_start = max(project_start_offset, earliest)
+        if task.constraint_offset is not None:
+            task.early_start = max(task.early_start, task.constraint_offset)
+        if task.pinned_start is not None:
+            # Work that has already started sits where it actually started,
+            # even if the logic says it should have been later.
+            task.early_start = task.pinned_start
         task.early_finish = task.early_start + duration
 
     project_duration = max((by_id[t].early_finish for t in order), default=project_start_offset)
@@ -165,8 +178,15 @@ def calculate(
             latest = min(latest, candidate)
         task.late_finish = latest
         task.late_start = task.late_finish - duration
+        if task.complete:
+            # Finished work has no slack left to spend and cannot drive the
+            # finish date any more, so it is never reported as critical.
+            # In-progress work is deliberately NOT treated this way: its
+            # remaining portion still has a meaningful float.
+            task.late_start = task.early_start
+            task.late_finish = task.early_finish
         task.total_float = task.late_start - task.early_start
-        task.is_critical = task.total_float <= 0
+        task.is_critical = task.total_float <= 0 and not task.complete
 
     # --- free float -------------------------------------------------------
     for task_id in ids:

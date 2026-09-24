@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,48 @@ def _isolate_settings_cache():
 
     config_module.get_settings.cache_clear()
     os.environ.pop("IFCSCHED_LLM_ENABLED", None)
+
+
+# --- API flow fixtures, shared by every API test module ---------------------
+
+
+def wait_for_job(client, job_id: str, timeout: float = 120.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        response = client.get(f"/api/jobs/{job_id}")
+        assert response.status_code == 200
+        job = response.json()
+        if job["status"] in ("done", "failed"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
+
+
+@pytest.fixture
+def project(api_client, sample_ifc_path):
+    """A project with the sample IFC uploaded and parsed."""
+    response = api_client.post("/api/projects", json={"name": "Sample Tower"})
+    assert response.status_code == 200
+    project_id = response.json()["id"]
+
+    with open(sample_ifc_path, "rb") as handle:
+        response = api_client.post(
+            f"/api/projects/{project_id}/upload",
+            files={"file": ("sample.ifc", handle, "application/octet-stream")},
+        )
+    assert response.status_code == 200
+    job = wait_for_job(api_client, response.json()["job_id"])
+    assert job["status"] == "done", job.get("error")
+    return project_id
+
+
+@pytest.fixture
+def scheduled(api_client, project):
+    response = api_client.post(
+        f"/api/projects/{project}/schedule",
+        json={"level": "L3", "start_date": "2026-09-01"},
+    )
+    assert response.status_code == 200
+    job = wait_for_job(api_client, response.json()["job_id"])
+    assert job["status"] == "done", job.get("error")
+    return project

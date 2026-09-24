@@ -57,6 +57,41 @@ class WorkCalendar:
         """Inclusive finish date of a task starting at ``start_offset``."""
         return self.date_for_offset(start_offset + max(1, duration_days) - 1)
 
+    def offset_for_date(self, day: date | str) -> int:
+        """Inverse of date_for_offset: the working-day offset of ``day``.
+
+        A non-working day maps to the next working day's offset, which is what
+        "work reported on a Saturday" means on a five-day calendar. Dates before
+        the project start come back negative, so a variance can be signed.
+        """
+        target = _to_date(day)
+        if target is None:
+            raise ValueError(f"not a date: {day!r}")
+        if target < self.start_date:
+            return -self.working_days_between(target, self.start_date)
+        target = self.next_working_day(target)
+        # Extend the cache until it reaches the target, then bisect it.
+        while not self._cache or self._cache[-1] < target:
+            self.date_for_offset(len(self._cache) + 32)
+        from bisect import bisect_left
+
+        return bisect_left(self._cache, target)
+
+    def working_days_between(self, start: date | str, end: date | str) -> int:
+        """Signed count of working days in [start, end); negative if end < start."""
+        a, b = _to_date(start), _to_date(end)
+        if a is None or b is None:
+            raise ValueError("working_days_between needs two dates")
+        if b < a:
+            return -self.working_days_between(b, a)
+        count = 0
+        cursor = a
+        while cursor < b:
+            if self.is_working_day(cursor):
+                count += 1
+            cursor += timedelta(days=1)
+        return count
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "start_date": self.start_date.isoformat(),

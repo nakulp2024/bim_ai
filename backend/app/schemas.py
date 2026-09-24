@@ -68,3 +68,30 @@ class CalendarUpdate(BaseModel):
 
 
 TaskUpdate.model_rebuild()
+
+
+# --- progress --------------------------------------------------------------
+
+
+class ProgressEntryIn(BaseModel):
+    task_id: str
+    percent_complete: float | None = Field(default=None, ge=0, le=100)
+    quantity_placed: float | None = Field(default=None, ge=0)
+    actual_start: str | None = None
+    actual_finish: str | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class ProgressReport(BaseModel):
+    """A batch of task updates, reported together (e.g. one daily report)."""
+
+    entries: list[ProgressEntryIn] = Field(min_length=1, max_length=5000)
+    reported_on: str | None = None
+
+
+class BaselineCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+
+
+class DataDateUpdate(BaseModel):
+    data_date: str

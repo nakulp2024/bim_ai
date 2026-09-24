@@ -18,7 +18,9 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -26,6 +28,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -60,6 +64,9 @@ class Project(Base):
     rate_overrides = Column(JSON, default=dict)
     schedule_options = Column(JSON, default=dict)
     error = Column(Text)
+    # The "as of" date progress is reported against. Null means today.
+    data_date = Column(Date)
+    geometry_status = Column(String(20))  # null|building|ready|failed
 
     schedule = relationship(
         "ScheduleRecord",
@@ -80,6 +87,8 @@ class Project(Base):
             "status": self.status,
             "error": self.error,
             "has_schedule": self.schedule is not None,
+            "data_date": self.data_date.isoformat() if self.data_date else None,
+            "geometry_status": self.geometry_status,
         }
 
 
@@ -145,6 +154,70 @@ class JobRecord(Base):
         }
 
 
+class BaselineRecord(Base):
+    """A frozen copy of the plan that progress is measured against.
+
+    Several can exist per project (a re-baseline after a major change keeps the
+    old one for the record); exactly one is current.
+    """
+
+    __tablename__ = "baselines"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=_now)
+    is_current = Column(Boolean, default=True)
+    tasks = Column(JSON, default=list)
+    finish_date = Column(String(10))
+    task_count = Column(Integer, default=0)
+
+    def as_dict(self, include_tasks: bool = False) -> dict[str, Any]:
+        payload = {
+            "id": self.id,
+            "project_id": self.project_id,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "is_current": bool(self.is_current),
+            "finish_date": self.finish_date,
+            "task_count": self.task_count,
+        }
+        if include_tasks:
+            payload["tasks"] = self.tasks or []
+        return payload
+
+
+class ProgressUpdate(Base):
+    """One report of progress on one task. Append-only: the latest per task is
+    the current state, and the history is kept for the audit trail."""
+
+    __tablename__ = "progress_updates"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    task_id = Column(String(80), index=True, nullable=False)
+    reported_on = Column(Date, nullable=False)
+    percent_complete = Column(Float)
+    quantity_placed = Column(Float)
+    actual_start = Column(Date)
+    actual_finish = Column(Date)
+    note = Column(Text)
+    created_at = Column(DateTime, default=_now)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "task_id": self.task_id,
+            "reported_on": self.reported_on.isoformat() if self.reported_on else None,
+            "percent_complete": self.percent_complete,
+            "quantity_placed": self.quantity_placed,
+            "actual_start": self.actual_start.isoformat() if self.actual_start else None,
+            "actual_finish": self.actual_finish.isoformat() if self.actual_finish else None,
+            "note": self.note,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 _engine = None
 _SessionLocal: sessionmaker | None = None
 
@@ -166,7 +239,29 @@ def get_engine():
 
 
 def init_db() -> None:
-    Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine) -> None:
+    """create_all() never alters an existing table, so a database created by an
+    earlier version would be missing any column added since. Add them. Only
+    additive, nullable changes are handled; anything else needs a migration."""
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                ddl_type = column.type.compile(dialect=engine.dialect)
+                connection.execute(
+                    text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}')
+                )
 
 
 def get_sessionmaker() -> sessionmaker:
